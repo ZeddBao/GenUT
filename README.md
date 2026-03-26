@@ -88,7 +88,7 @@ genut/
 - Python 包：`clang`（libclang Python 绑定）
 
 ```bash
-pip install clang
+pip install libclang
 ```
 
 ### 系统特定安装

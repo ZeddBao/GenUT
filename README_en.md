@@ -88,7 +88,7 @@ genut/
 - Python package: `clang` (libclang Python bindings)
 
 ```bash
-pip install clang
+pip install libclang
 ```
 
 ### System Requirements
