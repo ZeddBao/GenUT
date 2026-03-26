@@ -123,6 +123,7 @@ Thumbs.db
 
 
 # 项目特定忽略
+utgen.json
 
 # Test project build outputs
 test_c_project/build/

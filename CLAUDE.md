@@ -32,6 +32,7 @@ python gen_ut.py --compdb compile_commands.json --src src/file.c --project-root 
 The `test_c_project/` directory contains a sample C project for testing the generator.
 
 **Windows (PowerShell):**
+
 ```bash
 cd test_c_project
 .\build.ps1          # Build
@@ -39,6 +40,7 @@ cd test_c_project
 ```
 
 **Unix/Git Bash:**
+
 ```bash
 cd test_c_project
 ./build.sh          # Build
@@ -46,6 +48,7 @@ cd test_c_project
 ```
 
 Build outputs:
+
 - Binary: `build/test_c_project.exe`
 - Compilation database: `compile_commands.json` (used by libclang)
 
@@ -68,6 +71,7 @@ Single-file Python application with these key classes:
 ### Output Files
 
 Generated test files follow this naming convention:
+
 - `ut_<module>.h` - Header with `extern "C"` function declarations
 - `ut_<module>.cpp` - GTest test cases
 
