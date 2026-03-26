@@ -10,11 +10,11 @@ import sys
 import os
 import argparse
 
-from compdb import CompDbParser
-from analyzer import CSourceAnalyzer
-from builder import GTestBuilder
-from models import PathConstraint, FunctionInfo
-from config import GeneratorConfig
+from genut.compdb import CompDbParser
+from genut.analyzer import CSourceAnalyzer
+from genut.builder import GTestBuilder
+from genut.models import PathConstraint, FunctionInfo
+from genut.config import GeneratorConfig
 
 
 class UTGeneratorApp:

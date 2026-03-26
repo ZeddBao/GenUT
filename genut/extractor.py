@@ -3,7 +3,7 @@
 import re
 import clang.cindex as clang
 
-from models import PathConstraint
+from .models import PathConstraint
 
 
 class ConstraintExtractor:

@@ -4,8 +4,8 @@ import os
 import re
 import clang.cindex as clang
 
-from models import FunctionInfo
-from extractor import ConstraintExtractor
+from .models import FunctionInfo
+from .extractor import ConstraintExtractor
 
 
 class CSourceAnalyzer:

@@ -3,8 +3,8 @@
 import os
 import re
 
-from models import PathConstraint, FunctionInfo
-from config import GeneratorConfig
+from .models import PathConstraint, FunctionInfo
+from .config import GeneratorConfig
 
 
 class GTestBuilder:
