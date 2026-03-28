@@ -37,6 +37,7 @@ class GeneratorConfig:
         'bool', 'size_t', 'unsigned', 'signed'
     ])
     compiler: str = "auto"  # "auto", "gcc", "clang"
+    copyright_header: List[str] = field(default_factory=list)  # Lines to add as copyright header
 
     @classmethod
     def from_file(cls, config_path: str) -> 'GeneratorConfig':
@@ -54,7 +55,8 @@ class GeneratorConfig:
             naming=naming,
             default_values=defaults,
             basic_type_keywords=data.get('basic_type_keywords', cls.__dataclass_fields__['basic_type_keywords'].default_factory()),
-            compiler=data.get('compiler', 'auto')
+            compiler=data.get('compiler', 'auto'),
+            copyright_header=data.get('copyright_header', [])
         )
 
     @classmethod

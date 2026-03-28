@@ -48,10 +48,23 @@ class GTestBuilder:
         return self.config.naming.test_name_pattern.format(
             func=func_name, index=path_index)
 
+    def _build_copyright_header(self):
+        """Build copyright header lines if configured."""
+        if not self.config.copyright_header:
+            return []
+        lines = []
+        for line in self.config.copyright_header:
+            lines.append(line)
+        return lines
+
     def build_header(self):
         """Build the header file with function declarations."""
         guard = f"{self.out_base_name.upper()}_H"
         code = []
+        # Add copyright header if configured
+        code.extend(self._build_copyright_header())
+        if self.config.copyright_header:
+            code.append("")
         code.append(f"#ifndef {guard}")
         code.append(f"#define {guard}")
         code.append("")
@@ -113,6 +126,10 @@ class GTestBuilder:
     def _build_cpp_header(self):
         """Build the header section of the C++ test file."""
         code = []
+        # Add copyright header if configured
+        code.extend(self._build_copyright_header())
+        if self.config.copyright_header:
+            code.append("")
         code.append("// --- Auto-generated GTest Framework ---")
         code.append("#include <gtest/gtest.h>")
         code.append(f'#include "{self.out_base_name}.h"')

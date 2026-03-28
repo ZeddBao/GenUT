@@ -8,12 +8,22 @@ class StubBuilder:
 
     def __init__(self, source_file, funcs_info, config, outdir=None):
         self.funcs_info = funcs_info
+        self.config = config
         out_dir = os.path.abspath(outdir) if outdir else os.path.dirname(os.path.abspath(source_file))
         base_name = os.path.splitext(os.path.basename(source_file))[0]
         naming = config.naming
         out_base = f"{naming.file_prefix}{base_name}{naming.file_suffix}"
         self.out_base_name = out_base
         self.out_stub_cpp_path = os.path.join(out_dir, f"{out_base}_stub.cpp")
+
+    def _build_copyright_header(self):
+        """Build copyright header lines if configured."""
+        if not self.config.copyright_header:
+            return []
+        lines = []
+        for line in self.config.copyright_header:
+            lines.append(line)
+        return lines
 
     def _iter_stubs(self):
         """Yield (func, path_index, stub_constraint) for all paths that need stubs."""
@@ -45,6 +55,10 @@ class StubBuilder:
     def build_stub_cpp(self):
         """Generate the full content of the _stub.cpp file."""
         lines = []
+        # Add copyright header if configured
+        lines.extend(self._build_copyright_header())
+        if self.config.copyright_header:
+            lines.append("")
         lines.append("// --- Auto-generated Stub Implementations ---")
         lines.append(f'#include "{self.out_base_name}.h"')
         lines.append("")
