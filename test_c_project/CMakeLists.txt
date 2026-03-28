@@ -13,6 +13,8 @@ set(SOURCES
     src/data_processor.c
     src/state_machine.c
     src/sensor.c
+    src/global_ptr_test.c
+    src/stub_test.c
 )
 
 # Header files (for IDE support)
@@ -21,6 +23,8 @@ set(HEADERS
     include/data_processor.h
     include/state_machine.h
     include/sensor.h
+    include/global_ptr_test.h
+    include/stub_test.h
 )
 
 # Create library

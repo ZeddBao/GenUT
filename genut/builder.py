@@ -11,13 +11,16 @@ class GTestBuilder:
     """Responsible for generating GTest framework code with configurable naming and defaults."""
 
     def __init__(self, source_file, funcs_info, known_constants,
-                 config: GeneratorConfig, outdir=None, project_includes=None, construct=False):
+                 config: GeneratorConfig, outdir=None, project_includes=None, construct=False,
+                 stub_framework=None, stub_builder=None):
         self.source_file = source_file
         self.funcs_info = funcs_info
         self.known_constants = known_constants
         self.project_includes = project_includes or []
         self.construct = construct
         self.config = config
+        self.stub_framework = stub_framework  # StubFrameworkBase instance or None
+        self.stub_builder = stub_builder      # StubBuilder instance or None
 
         # Resolve output paths using naming configuration
         self._resolve_output_paths(outdir)
@@ -77,6 +80,14 @@ class GTestBuilder:
         for func in self.funcs_info:
             code.append(func.get_declaration())
         code.append("")
+
+        if self.stub_builder:
+            stub_decls = self.stub_builder.build_stub_declarations()
+            if stub_decls:
+                code.append("// --- Stub Function Declarations ---")
+                code.extend(stub_decls)
+                code.append("")
+
         code.append('} // extern "C"')
         code.append("")
         code.append(f"#endif // {guard}")
@@ -124,6 +135,13 @@ class GTestBuilder:
         desc = f"  // {path.description}" if path.description else ""
         code.append(f"TEST_F({self.test_suite_name}, {test_name}) {{{desc}")
 
+        # Install stubs before any setup
+        if self.stub_framework and self.stub_builder and path.stub_constraints:
+            for sc in path.stub_constraints:
+                stub_name = self.stub_builder.stub_func_name(sc.callee_name, func.name, path_index)
+                code.append(self.stub_framework.install_stub(sc.callee_name, stub_name))
+            code.append("")
+
         if self.construct and func.global_vars:
             code.extend(self._build_global_var_setup(func.global_vars, path.param_values))
 
@@ -131,6 +149,13 @@ class GTestBuilder:
             code.extend(self._build_param_init(param, path.param_values, path_index))
 
         code.extend(self._build_func_call_and_assert(func, path, path_index))
+
+        # Uninstall stubs after the call
+        if self.stub_framework and path.stub_constraints:
+            code.append("")
+            for sc in path.stub_constraints:
+                code.append(self.stub_framework.uninstall_stub(sc.callee_name))
+
         code.append("}")
         code.append("")
         return code
@@ -140,18 +165,37 @@ class GTestBuilder:
         code = []
         for g_name, g_info in global_vars.items():
             val = param_values.get(g_name)
+            g_type = g_info['type']
             canon_type = g_info['canonical_type']
+            is_ptr = '*' in canon_type
 
-            if val is not None:
+            if is_ptr:
+                base_type = g_type.replace('*', '').replace('const', '').strip()
+                local = f"{g_name}_val"
                 if isinstance(val, dict):
-                    code.append(f"    {g_name} = {{}}; // Reset struct to avoid interference")
+                    # Pointer with struct field constraints: allocate backing local, assign fields
+                    code.append(f"    {base_type} {local} = {{}};")
                     for field, fval in val.items():
-                        code.append(f"    {g_name}.{field} = {fval};")
-                else:
+                        code.append(f"    {local}.{field} = {fval};")
+                    code.append(f"    {g_name} = &{local};")
+                elif val is not None:
+                    # Scalar constraint on the pointer itself (e.g. NULL-check branch)
                     code.append(f"    {g_name} = {val};")
+                else:
+                    # No constraint: allocate a zero-initialized backing local to avoid NULL deref
+                    code.append(f"    {base_type} {local} = {{}};")
+                    code.append(f"    {g_name} = &{local};")
             else:
-                def_val = self._default_value(canon_type)
-                code.append(f"    {g_name} = {def_val};")
+                if val is not None:
+                    if isinstance(val, dict):
+                        code.append(f"    {g_name} = {{}}; // Reset struct to avoid interference")
+                        for field, fval in val.items():
+                            code.append(f"    {g_name}.{field} = {fval};")
+                    else:
+                        code.append(f"    {g_name} = {val};")
+                else:
+                    def_val = self._default_value(canon_type)
+                    code.append(f"    {g_name} = {def_val};")
 
         if global_vars:
             code.append("")
@@ -184,6 +228,12 @@ class GTestBuilder:
                 code.append(f"    {ptype} {pname} = {{}};")
                 for field, fval in val.items():
                     code.append(f"    {pname}.{field} = {fval};")
+        elif is_ptr and val is None and not self._is_basic_type(canon_type):
+            # Non-basic pointer with no constraint: allocate a backing local to avoid NULL deref
+            base_type = ptype.replace('*', '').replace('const', '').strip()
+            local = f"{pname}_val"
+            code.append(f"    {base_type} {local} = {{}};")
+            code.append(f"    {ptype} {pname} = &{local};")
         else:
             scalar = val if (val is not None and not isinstance(val, dict)) else self._default_value(canon_type)
             code.append(f"    {ptype} {pname} = {scalar};")

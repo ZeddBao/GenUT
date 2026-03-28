@@ -15,6 +15,8 @@ from genut.analyzer import CSourceAnalyzer
 from genut.builder import GTestBuilder
 from genut.models import PathConstraint, FunctionInfo
 from genut.config import GeneratorConfig
+from genut.stub_framework import get_stub_framework
+from genut.stub_builder import StubBuilder
 
 
 class UTGeneratorApp:
@@ -26,6 +28,7 @@ class UTGeneratorApp:
         self.target_funcs = [f.strip() for f in args.funcs.split(';') if f.strip()]
         self.outdir = args.outdir
         self.construct = args.construct
+        self.stub_framework_name = args.stub_framework
 
         if args.project_root:
             self.project_root = os.path.abspath(args.project_root)
@@ -73,6 +76,18 @@ class UTGeneratorApp:
 
         print(f"Found {len(funcs_info)} matching function(s). Generating GTest code...")
 
+        # Set up stub framework and builder if requested
+        stub_framework = None
+        stub_builder = None
+        if self.stub_framework_name:
+            stub_framework = get_stub_framework(self.stub_framework_name)
+            stub_builder = StubBuilder(
+                source_file=self.source_file,
+                funcs_info=funcs_info,
+                config=self.config,
+                outdir=self.outdir,
+            )
+
         builder = GTestBuilder(
             source_file=self.source_file,
             funcs_info=funcs_info,
@@ -80,7 +95,9 @@ class UTGeneratorApp:
             config=self.config,
             outdir=self.outdir,
             project_includes=project_includes,
-            construct=self.construct
+            construct=self.construct,
+            stub_framework=stub_framework,
+            stub_builder=stub_builder,
         )
 
         h_code = builder.build_header()
@@ -88,6 +105,10 @@ class UTGeneratorApp:
 
         self._write_output(builder.out_h_path, h_code)
         self._write_output(builder.out_cpp_path, cpp_code)
+
+        if stub_builder and stub_builder.has_stubs():
+            stub_cpp_code = stub_builder.build_stub_cpp()
+            self._write_output(stub_builder.out_stub_cpp_path, stub_cpp_code)
 
     def _write_output(self, file_path, content):
         """Write generated code to file."""
@@ -132,6 +153,11 @@ def main():
     parser.add_argument(
         "--compiler", required=False, default="auto", choices=["auto", "gcc", "clang"],
         help="Compiler to use for system include detection (auto, gcc, or clang)."
+    )
+    parser.add_argument(
+        "--stub-framework", required=False, default=None, choices=["macro"],
+        help="Enable stub generation with the specified framework. "
+             "'macro' uses INSTALL_STUB(objFunc, stubFunc) / UNINSTALL_STUB(objFunc)."
     )
 
     args = parser.parse_args()
