@@ -75,6 +75,13 @@ class GTestBuilder:
                 code.append(f"#include {inc}")
             code.append("")
 
+        # Add user-specified extra includes
+        if self.config.extra_includes:
+            code.append("// --- User-Specified Extra Includes ---")
+            for inc in self.config.extra_includes:
+                code.append(f"#include {inc}")
+            code.append("")
+
         all_globals = {}
         for func in self.funcs_info:
             for g_name, g_info in func.global_vars.items():
@@ -133,6 +140,10 @@ class GTestBuilder:
         code.append("// --- Auto-generated GTest Framework ---")
         code.append("#include <gtest/gtest.h>")
         code.append(f'#include "{self.out_base_name}.h"')
+        # Add user-specified extra includes
+        if self.config.extra_includes:
+            for inc in self.config.extra_includes:
+                code.append(f"#include {inc}")
         code.append("")
         code.append(f"class {self.test_suite_name} : public ::testing::Test {{")
         code.append("protected:")

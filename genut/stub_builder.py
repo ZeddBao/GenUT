@@ -61,6 +61,10 @@ class StubBuilder:
             lines.append("")
         lines.append("// --- Auto-generated Stub Implementations ---")
         lines.append(f'#include "{self.out_base_name}.h"')
+        # Add user-specified extra includes
+        if self.config.extra_includes:
+            for inc in self.config.extra_includes:
+                lines.append(f"#include {inc}")
         lines.append("")
 
         seen = set()
