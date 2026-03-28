@@ -25,6 +25,12 @@ python gen_ut.py --compdb compile_commands.json --src src/file.c --funcs "func1;
 
 # Specify project root for internal header detection
 python gen_ut.py --compdb compile_commands.json --src src/file.c --project-root /path/to/project
+
+# Use stub framework with macro-based stubbing
+python gen_ut.py --compdb compile_commands.json --src src/file.c --construct --stub-framework macro
+
+# Use custom configuration file
+python gen_ut.py --config utgen.json --compdb compile_commands.json --src src/file.c
 ```
 
 ### Build Test C Project
@@ -60,20 +66,26 @@ Single-file Python application with these key classes:
 
 | Class | Responsibility |
 |-------|---------------|
-| `PathConstraint` | Stores parameter constraints for a test path |
+| `PathConstraint` | Stores parameter constraints for a test path, including stub constraints |
 | `FunctionInfo` | Holds extracted function metadata (name, return type, params, complexity, paths) |
 | `CompDbParser` | Parses `compile_commands.json` to extract compiler arguments |
 | `CSourceAnalyzer` | Uses libclang to parse C source and extract function info |
-| `ConstraintExtractor` | Extracts if/switch branch conditions, generates path constraints |
-| `GTestBuilder` | Generates GTest-compatible `.cpp` and `.h` files |
+| `ConstraintExtractor` | Extracts if/switch branch conditions and function call constraints |
+| `GTestBuilder` | Generates GTest-compatible `.cpp` and `.h` files with configurable naming and defaults |
+| `StubFrameworkBase` | Abstract base class for stub frameworks (macro-based implementation included) |
+| `StubBuilder` | Generates stub function declarations and implementations |
+| `GeneratorConfig` | Configuration class for naming, default values, copyright headers, extra includes |
 | `UTGeneratorApp` | Main entry point with CLI argument handling |
 
 ### Output Files
 
-Generated test files follow this naming convention:
+Generated test files follow this naming convention (configurable via `naming` config):
 
-- `ut_<module>.h` - Header with `extern "C"` function declarations
-- `ut_<module>.cpp` - GTest test cases
+- `<prefix><module><suffix>.h` - Header with `extern "C"` function declarations and stub declarations
+- `<prefix><module><suffix>.cpp` - GTest test cases (with `INSTALL_STUB`/`UNINSTALL_STUB` when using stub framework)
+- `<prefix><module><suffix>_stub.cpp` - Stub function implementations (when using `--stub-framework`)
+
+Default naming: `ut_<module>.h`, `ut_<module>.cpp`, `ut_<module>_stub.cpp`
 
 ### Test Project Structure
 
