@@ -11,6 +11,8 @@
 - **圈复杂度计算**：根据函数复杂度生成适当数量的测试用例
 - **模块化设计**：关注点分离，支持配置注入
 - **打桩器支持**：自动检测函数调用，生成 stub 函数，支持抽象打桩框架，处理函数返回值和输出参数约束
+- **版权头生成**：可配置的版权声明，自动添加到所有生成文件的开头
+- **额外头文件包含**：支持用户指定额外的头文件，自动包含在所有生成文件中
 
 ## 快速开始
 
@@ -194,11 +196,110 @@ python gen_ut.py --compdb compile_commands.json --src src/file.c --construct --s
 }
 ```
 
+### 配置字段说明
+
+| 字段 | 类型 | 描述 | 默认值 |
+|------|------|------|--------|
+| `naming.file_prefix` | 字符串 | 生成文件的前缀 | `"ut_"` |
+| `naming.file_suffix` | 字符串 | 生成文件的后缀 | `""` |
+| `naming.suite_suffix` | 字符串 | 测试套件类的后缀 | `"Test"` |
+| `naming.test_name_pattern` | 字符串 | 测试用例命名模式，可用变量：`{func}`（函数名）、`{index}`（路径索引） | `"{func}_Path{index}"` |
+| `default_values.int_default` | 字符串 | int 类型参数的默认值 | `"0"` |
+| `default_values.float_default` | 字符串 | float/double 类型参数的默认值 | `"0.0"` |
+| `default_values.pointer_default` | 字符串 | 指针类型参数的默认值 | `"nullptr"` |
+| `default_values.struct_default` | 字符串 | 结构体类型参数的默认值 | `"{}"` |
+| `default_values.bool_default` | 字符串 | bool 类型参数的默认值 | `"false"` |
+| `default_values.custom_type_defaults` | 对象 | 自定义类型的默认值映射 | `{}` |
+| `basic_type_keywords` | 字符串数组 | 基本类型关键字列表，用于类型识别 | 常见 C 类型 |
+| `compiler` | 字符串 | 编译器检测模式："auto"、"gcc" 或 "clang" | `"auto"` |
+| `copyright_header` | 字符串数组 | 版权声明行，将添加到每个生成文件的顶部 | `[]` |
+| `extra_includes` | 字符串数组 | 额外的头文件包含，将添加到所有生成文件中 | `[]` |
+
+**注意**：
+- `extra_includes` 支持系统包含（`<header.h>`）和本地包含（`"header.h"`）
+- `copyright_header` 的每一行都会原样添加到生成文件的开头
+- `custom_type_defaults` 的键是类型名称，值是默认值的 C 表达式
+
 ### 使用配置
 
 ```bash
 python gen_ut.py --config utgen.json --compdb compile_commands.json --src src/file.c
 ```
+
+## Stub框架
+
+genut 提供了一个可扩展的打桩框架，用于替换被测试函数中调用的外部函数。这对于测试依赖外部函数返回值的代码路径特别有用。
+
+### 工作原理
+
+1. **函数调用检测**：分析器检测被测试函数中的函数调用，并记录调用信息（函数名、返回类型、参数）
+2. **约束提取**：当函数调用结果用于条件判断时（如 `if (validate_input(x) > 0)`），提取器会计算满足分支条件所需的返回值
+3. **Stub生成**：为每个需要打桩的路径生成独立的 stub 函数，返回特定值以满足路径条件
+4. **测试集成**：在生成的测试用例中插入 `INSTALL_STUB` 和 `UNINSTALL_STUB` 宏，在测试执行期间替换原函数
+
+### 宏式打桩器（当前实现）
+
+genut 目前实现了基于宏的打桩框架：
+
+```c
+// 在测试用例中使用
+INSTALL_STUB(original_function, stub_function);  // 安装 stub
+// ... 调用被测试函数 ...
+UNINSTALL_STUB(original_function);               // 卸载 stub
+```
+
+生成的 stub 函数示例：
+```cpp
+int32_t stub_validate_input_test_function_1(int32_t input) {
+    (void)input;  // 抑制未使用参数警告
+    return 42;    // 返回满足路径条件的值
+}
+```
+
+### 创建自定义打桩框架
+
+你可以通过继承 `StubFrameworkBase` 类创建自定义打桩框架：
+
+```python
+from genut.stub_framework import StubFrameworkBase
+
+class MyCustomStubFramework(StubFrameworkBase):
+    name = "custom"
+
+    def install_stub(self, obj_func, stub_func):
+        return f"    MY_INSTALL({obj_func}, {stub_func});"
+
+    def uninstall_stub(self, obj_func):
+        return f"    MY_UNINSTALL({obj_func});"
+```
+
+然后在 `get_stub_framework()` 函数中注册你的实现。
+
+### 输出文件
+
+当使用 `--stub-framework` 参数时，会生成三个文件：
+
+1. `<前缀><模块>.h` - 包含原函数声明和 stub 函数声明
+2. `<前缀><模块>.cpp` - 包含测试用例，其中有 `INSTALL_STUB`/`UNINSTALL_STUB` 调用
+3. `<前缀><模块>_stub.cpp` - 包含所有 stub 函数的实现
+
+### 使用示例
+
+```bash
+# 使用宏式打桩器
+python gen_ut.py --compdb compile_commands.json --src src/myfile.c \
+    --construct --stub-framework macro
+
+# 针对特定函数
+python gen_ut.py --compdb compile_commands.json --src src/myfile.c \
+    --funcs "function_using_external_calls" --construct --stub-framework macro
+```
+
+### 限制
+
+- 仅支持直接函数调用，不支持函数指针调用
+- 无法处理通过宏展开的函数调用
+- 输出参数的约束求解有限（仅支持指针类型）
 
 ## 工作原理
 
