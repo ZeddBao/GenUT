@@ -118,7 +118,7 @@ class GTestBuilder:
             code.append(decl)
         code.append("")
 
-        if self.stub_builder:
+        if False and self.stub_builder:
             stub_decls = self.stub_builder.build_stub_declarations()
             if stub_decls:
                 code.append("// --- Stub Function Declarations ---")
@@ -172,7 +172,7 @@ class GTestBuilder:
         code.append("")
 
         # Add stub macros if using stub framework
-        if self.stub_framework and self.stub_framework.name == "macro":
+        if False and self.stub_framework and self.stub_framework.name == "macro":
             code.append("// --- Stub Framework Macros ---")
             code.append("#ifndef INSTALL_STUB")
             code.append("#define INSTALL_STUB(objFunc, stubFunc) \\")
@@ -224,7 +224,7 @@ class GTestBuilder:
         code.append(f"TEST_F({self.test_suite_name}, {test_name}) {{{desc}")
 
         # Install stubs before any setup
-        if self.stub_framework and self.stub_builder and path.stub_constraints:
+        if False and self.stub_framework and self.stub_builder and path.stub_constraints:
             for sc in path.stub_constraints:
                 stub_name = self.stub_builder.stub_func_name(
                     sc.callee_name, func.name, path_index,
@@ -252,7 +252,7 @@ class GTestBuilder:
         code.extend(self._build_func_call_and_assert(func, path, path_index))
 
         # Uninstall stubs after the call
-        if self.stub_framework and path.stub_constraints:
+        if False and self.stub_framework and path.stub_constraints:
             code.append("")
             for sc in path.stub_constraints:
                 if sc.is_function_pointer:
