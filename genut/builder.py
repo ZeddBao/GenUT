@@ -118,12 +118,12 @@ class GTestBuilder:
             code.append(decl)
         code.append("")
 
-        if False and self.stub_builder:
+        if self.stub_builder:
             stub_decls = self.stub_builder.build_stub_declarations()
             if stub_decls:
                 code.append("// --- Stub Function Declarations ---")
-                for stub_decl in stub_decls:
-                    stub_decl = self._c_to_cpp_type(stub_decl)
+                for stub_decls in stub_decls:
+                    stub_decl = self._c_to_cpp_type(stub_decls)
                     code.append(stub_decl)
                 code.append("")
 
@@ -224,7 +224,7 @@ class GTestBuilder:
         code.append(f"TEST_F({self.test_suite_name}, {test_name}) {{{desc}")
 
         # Install stubs before any setup
-        if False and self.stub_framework and self.stub_builder and path.stub_constraints:
+        if self.stub_framework and self.stub_builder and path.stub_constraints:
             for sc in path.stub_constraints:
                 stub_name = self.stub_builder.stub_func_name(
                     sc.callee_name, func.name, path_index,
@@ -252,7 +252,7 @@ class GTestBuilder:
         code.extend(self._build_func_call_and_assert(func, path, path_index))
 
         # Uninstall stubs after the call
-        if False and self.stub_framework and path.stub_constraints:
+        if self.stub_framework and path.stub_constraints:
             code.append("")
             for sc in path.stub_constraints:
                 if sc.is_function_pointer:
