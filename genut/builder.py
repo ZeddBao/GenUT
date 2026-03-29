@@ -93,19 +93,38 @@ class GTestBuilder:
         if all_globals:
             code.append("// --- External Global Variables ---")
             for g_name, g_type in all_globals.items():
-                code.append(f"extern {g_type} {g_name};")
+                # Convert C types to C++ compatible types (e.g., _Bool -> bool)
+                g_type = self._c_to_cpp_type(g_type)
+                # Fix function pointer declarations
+                # Type string might be "int (*)(int, int)" or "int (*[4])(int, int)"
+                # but we need "int (*global_math_op)(int, int)" or "int (*global_op_array[4])(int, int)"
+                if '(*[' in g_type:
+                    # Array of function pointers: "int (*[4])(int, int)" -> "int (*global_op_array[4])(int, int)"
+                    fixed_type = g_type.replace('(*[', f'(*{g_name}[')
+                    code.append(f"extern {fixed_type};")
+                elif '(*)' in g_type:
+                    # Simple function pointer: "int (*)(int, int)" -> "int (*global_math_op)(int, int)"
+                    fixed_type = g_type.replace('(*)', f'(*{g_name})')
+                    code.append(f"extern {fixed_type};")
+                else:
+                    code.append(f"extern {g_type} {g_name};")
             code.append("")
 
         code.append("// --- Target Function Declarations ---")
         for func in self.funcs_info:
-            code.append(func.get_declaration())
+            decl = func.get_declaration()
+            # Convert C types to C++ compatible types
+            decl = self._c_to_cpp_type(decl)
+            code.append(decl)
         code.append("")
 
         if self.stub_builder:
             stub_decls = self.stub_builder.build_stub_declarations()
             if stub_decls:
                 code.append("// --- Stub Function Declarations ---")
-                code.extend(stub_decls)
+                for stub_decl in stub_decls:
+                    stub_decl = self._c_to_cpp_type(stub_decl)
+                    code.append(stub_decl)
                 code.append("")
 
         code.append('} // extern "C"')
@@ -121,6 +140,12 @@ class GTestBuilder:
         if '*' not in t and any(k in t for k in basic_keywords):
             return True
         return False
+
+    def _c_to_cpp_type(self, type_str):
+        """Convert C type keywords to C++ compatible types."""
+        # Replace _Bool with bool for C++ compatibility
+        result = type_str.replace('_Bool', 'bool')
+        return result
 
     def build_cpp(self):
         """Build the C++ test file."""
@@ -145,6 +170,41 @@ class GTestBuilder:
             for inc in self.config.extra_includes:
                 code.append(f"#include {inc}")
         code.append("")
+
+        # Add stub macros if using stub framework
+        if self.stub_framework and self.stub_framework.name == "macro":
+            code.append("// --- Stub Framework Macros ---")
+            code.append("#ifndef INSTALL_STUB")
+            code.append("#define INSTALL_STUB(objFunc, stubFunc) \\")
+            code.append("    do { \\")
+            code.append("        static decltype(&objFunc) __saved_##objFunc = objFunc; \\")
+            code.append("        objFunc = stubFunc; \\")
+            code.append("    } while(0)")
+            code.append("#endif")
+            code.append("")
+            code.append("#ifndef UNINSTALL_STUB")
+            code.append("#define UNINSTALL_STUB(objFunc) \\")
+            code.append("    do { \\")
+            code.append("        objFunc = __saved_##objFunc; \\")
+            code.append("    } while(0)")
+            code.append("#endif")
+            code.append("")
+            code.append("#ifndef INSTALL_FUNC_PTR_STUB")
+            code.append("#define INSTALL_FUNC_PTR_STUB(var, stub) \\")
+            code.append("    do { \\")
+            code.append("        static __typeof__(var) __saved_##var = var; \\")
+            code.append("        var = stub; \\")
+            code.append("    } while(0)")
+            code.append("#endif")
+            code.append("")
+            code.append("#ifndef UNINSTALL_FUNC_PTR_STUB")
+            code.append("#define UNINSTALL_FUNC_PTR_STUB(var) \\")
+            code.append("    do { \\")
+            code.append("        var = __saved_##var; \\")
+            code.append("    } while(0)")
+            code.append("#endif")
+            code.append("")
+
         code.append(f"class {self.test_suite_name} : public ::testing::Test {{")
         code.append("protected:")
         code.append("    void SetUp() override {}")
@@ -166,8 +226,21 @@ class GTestBuilder:
         # Install stubs before any setup
         if self.stub_framework and self.stub_builder and path.stub_constraints:
             for sc in path.stub_constraints:
-                stub_name = self.stub_builder.stub_func_name(sc.callee_name, func.name, path_index)
-                code.append(self.stub_framework.install_stub(sc.callee_name, stub_name))
+                stub_name = self.stub_builder.stub_func_name(
+                    sc.callee_name, func.name, path_index,
+                    sc.is_function_pointer
+                )
+                if sc.is_function_pointer:
+                    # Function pointer stub
+                    var_name = sc.pointer_var_name or sc.callee_name
+                    code.append(self.stub_framework.install_func_ptr_stub(
+                        var_name, stub_name, sc.ret_type
+                    ))
+                else:
+                    # Direct function stub
+                    code.append(self.stub_framework.install_stub(
+                        sc.callee_name, stub_name
+                    ))
             code.append("")
 
         if self.construct and func.global_vars:
@@ -182,10 +255,160 @@ class GTestBuilder:
         if self.stub_framework and path.stub_constraints:
             code.append("")
             for sc in path.stub_constraints:
-                code.append(self.stub_framework.uninstall_stub(sc.callee_name))
+                if sc.is_function_pointer:
+                    # Function pointer stub
+                    var_name = sc.pointer_var_name or sc.callee_name
+                    code.append(self.stub_framework.uninstall_func_ptr_stub(var_name))
+                else:
+                    # Direct function stub
+                    code.append(self.stub_framework.uninstall_stub(sc.callee_name))
 
         code.append("}")
         code.append("")
+        return code
+
+    def _build_field_access(self, base, field):
+        """Build field access expression, handling array access syntax.
+
+        Args:
+            base: Base variable name (e.g., 'var_name' or 'var_name.field')
+            field: Field name (e.g., 'field', '[index]', '[0]')
+        Returns:
+            Field access expression (e.g., 'var_name.field' or 'var_name[index]')
+        """
+        if field.startswith('['):
+            return f"{base}{field}"
+        else:
+            return f"{base}.{field}"
+
+    def _generate_field_assignments(self, var_name, val_dict, indent=4):
+        """Generate field assignment code for nested dictionary values.
+
+        Args:
+            var_name: The base variable name (e.g., 'buffer' or 'buffer_val')
+            val_dict: Dictionary mapping field names to values (scalar or nested dict)
+            indent: Number of spaces for indentation
+        Returns:
+            List of code lines
+        """
+        code = []
+        space = ' ' * indent
+        for field, fval in val_dict.items():
+            # Skip metadata fields (start and end with __)
+            if field.startswith('__') and field.endswith('__'):
+                continue
+
+            if isinstance(fval, dict):
+                # Check if this field is a pointer (has __ptr__ marker)
+                is_ptr = fval.get('__ptr__', False)
+                # Remove metadata fields
+                clean_val_dict = {k: v for k, v in fval.items() if not (k.startswith('__') and k.endswith('__'))}
+
+                # Check if this dict represents a scalar value stored under 'value' key
+                # (e.g., leaf field with type information)
+                if len(clean_val_dict) == 1 and 'value' in clean_val_dict and not isinstance(clean_val_dict['value'], dict):
+                    # This is a scalar value with metadata (type, pointer flag)
+                    scalar_value = clean_val_dict['value']
+                    # Convert Python True/False to C true/false
+                    if scalar_value is True:
+                        scalar_str = "true"
+                    elif scalar_value is False:
+                        scalar_str = "false"
+                    else:
+                        scalar_str = str(scalar_value)
+                    code.append(f"{space}{self._build_field_access(var_name, field)} = {scalar_str};")
+                    continue  # Skip further processing
+
+                # Check for nested 'value' dict (leaf field stored as {'value': {'value': actual_value}})
+                if len(clean_val_dict) == 1 and 'value' in clean_val_dict and isinstance(clean_val_dict['value'], dict):
+                    nested = clean_val_dict['value']
+                    # Check if nested dict itself contains just a 'value' key with scalar
+                    if len(nested) == 1 and 'value' in nested and not isinstance(nested['value'], dict):
+                        scalar_value = nested['value']
+                        if scalar_value is True:
+                            scalar_str = "true"
+                        elif scalar_value is False:
+                            scalar_str = "false"
+                        else:
+                            scalar_str = str(scalar_value)
+                        code.append(f"{space}{self._build_field_access(var_name, field)} = {scalar_str};")
+                        continue  # Skip further processing
+
+                if clean_val_dict:
+                    if is_ptr:
+                        # Pointer field: need to allocate memory for the pointed-to struct
+                        # Generate a local variable for the pointed-to struct
+                        ptr_var_name = f"{var_name}_{field}_val"
+                        # Get type information if available
+                        ptr_type = fval.get('__type__')
+                        if ptr_type:
+                            # Remove any '*' from the type since we're declaring the pointed-to type
+                            # If ptr_type ends with '*', remove it
+                            if ptr_type.endswith('*'):
+                                pointed_type = ptr_type.rstrip('* ').strip()
+                            else:
+                                pointed_type = ptr_type
+                            code.append(f"{space}// Allocate memory for pointer field '{field}'")
+                            code.append(f"{space}{pointed_type} {ptr_var_name} = {{}};")
+                        else:
+                            # Type name is unknown, use a placeholder
+                            code.append(f"{space}// TODO: Allocate memory for pointer field '{field}'")
+                            code.append(f"{space}// Type unknown - replace 'UnknownType' with actual type")
+                            code.append(f"{space}UnknownType {ptr_var_name} = {{}};")
+
+                        # Special case: if clean_val_dict contains just a 'value' key that is a dict
+                        # with a single 'value' key (scalar), treat it as a scalar field
+                        if len(clean_val_dict) == 1 and 'value' in clean_val_dict and isinstance(clean_val_dict['value'], dict):
+                            nested = clean_val_dict['value']
+                            if len(nested) == 1 and 'value' in nested and not isinstance(nested['value'], dict):
+                                scalar_value = nested['value']
+                                if scalar_value is True:
+                                    scalar_str = "true"
+                                elif scalar_value is False:
+                                    scalar_str = "false"
+                                else:
+                                    scalar_str = str(scalar_value)
+                                code.append(f"{space}{ptr_var_name}.value = {scalar_str};")
+                                # Assign pointer to point to the local variable
+                                code.append(f"{space}{self._build_field_access(var_name, field)} = &{ptr_var_name};")
+                                continue  # Skip the rest of pointer processing
+
+                        # Generate assignments for fields of the pointed-to struct
+                        for subfield, subval in clean_val_dict.items():
+                            if isinstance(subval, dict):
+                                # Nested struct under pointer
+                                nested_code = self._generate_field_assignments(
+                                    self._build_field_access(ptr_var_name, subfield), subval, indent
+                                )
+                                code.extend(nested_code)
+                            else:
+                                # Scalar field under pointer
+                                if subval is True:
+                                    subval_str = "true"
+                                elif subval is False:
+                                    subval_str = "false"
+                                else:
+                                    subval_str = str(subval)
+                                code.append(f"{space}{self._build_field_access(ptr_var_name, subfield)} = {subval_str};")
+
+                        # Assign pointer to point to the local variable
+                        code.append(f"{space}{var_name}.{field} = &{ptr_var_name};")
+                    else:
+                        # Regular nested struct
+                        nested_code = self._generate_field_assignments(
+                            self._build_field_access(var_name, field), clean_val_dict, indent
+                        )
+                        code.extend(nested_code)
+            else:
+                # Scalar value assignment
+                # Convert Python True/False to C true/false
+                if fval is True:
+                    fval_str = "true"
+                elif fval is False:
+                    fval_str = "false"
+                else:
+                    fval_str = str(fval)
+                code.append(f"{space}{self._build_field_access(var_name, field)} = {fval_str};")
         return code
 
     def _build_global_var_setup(self, global_vars, param_values):
@@ -197,14 +420,18 @@ class GTestBuilder:
             canon_type = g_info['canonical_type']
             is_ptr = '*' in canon_type
 
-            if is_ptr:
+            # Check if this is a function pointer type (heuristic: contains "(*)" or ")(*")
+            is_func_ptr = ('(*)' in g_type) or (')(*' in g_type)
+
+            if is_ptr and not is_func_ptr:
                 base_type = g_type.replace('*', '').replace('const', '').strip()
                 local = f"{g_name}_val"
                 if isinstance(val, dict):
                     # Pointer with struct field constraints: allocate backing local, assign fields
                     code.append(f"    {base_type} {local} = {{}};")
-                    for field, fval in val.items():
-                        code.append(f"    {local}.{field} = {fval};")
+                    # Generate field assignments (supports nested dictionaries)
+                    field_assignments = self._generate_field_assignments(local, val)
+                    code.extend(field_assignments)
                     code.append(f"    {g_name} = &{local};")
                 elif val is not None:
                     # Scalar constraint on the pointer itself (e.g. NULL-check branch)
@@ -217,8 +444,9 @@ class GTestBuilder:
                 if val is not None:
                     if isinstance(val, dict):
                         code.append(f"    {g_name} = {{}}; // Reset struct to avoid interference")
-                        for field, fval in val.items():
-                            code.append(f"    {g_name}.{field} = {fval};")
+                        # Generate field assignments (supports nested dictionaries)
+                        field_assignments = self._generate_field_assignments(g_name, val)
+                        code.extend(field_assignments)
                     else:
                         code.append(f"    {g_name} = {val};")
                 else:
@@ -232,9 +460,9 @@ class GTestBuilder:
     def _build_param_init(self, param, param_values, path_index):
         """Build parameter initialization code."""
         code = []
-        ptype = param['type']
+        ptype = self._c_to_cpp_type(param['type'])
         pname = param['name']
-        canon_type = param['canonical_type']
+        canon_type = self._c_to_cpp_type(param['canonical_type'])
 
         if not self.construct:
             code.append(f"    {ptype} {pname} = /* init for path {path_index} */;")
@@ -244,20 +472,26 @@ class GTestBuilder:
         is_ptr = '*' in ptype
         is_struct_like = isinstance(val, dict) and not self._is_basic_type(canon_type)
 
+        # Check if this is a function pointer type (heuristic: contains "(*)" or ")(*")
+        is_func_ptr = ('(*)' in ptype) or (')(*' in ptype)
+
         if is_struct_like:
             base_type = ptype.replace('*', '').replace('const', '').strip()
             if is_ptr:
                 local = f"{pname}_val"
                 code.append(f"    {base_type} {local} = {{}};")
-                for field, fval in val.items():
-                    code.append(f"    {local}.{field} = {fval};")
+                # Generate field assignments (supports nested dictionaries)
+                field_assignments = self._generate_field_assignments(local, val)
+                code.extend(field_assignments)
                 code.append(f"    {ptype} {pname} = &{local};")
             else:
                 code.append(f"    {ptype} {pname} = {{}};")
-                for field, fval in val.items():
-                    code.append(f"    {pname}.{field} = {fval};")
-        elif is_ptr and val is None and not self._is_basic_type(canon_type):
+                # Generate field assignments (supports nested dictionaries)
+                field_assignments = self._generate_field_assignments(pname, val)
+                code.extend(field_assignments)
+        elif is_ptr and val is None and not self._is_basic_type(canon_type) and not is_func_ptr:
             # Non-basic pointer with no constraint: allocate a backing local to avoid NULL deref
+            # Skip for function pointers
             base_type = ptype.replace('*', '').replace('const', '').strip()
             local = f"{pname}_val"
             code.append(f"    {base_type} {local} = {{}};")
@@ -299,6 +533,33 @@ class GTestBuilder:
             if w not in ('true', 'false', 'nullptr', 'NULL'):
                 return True
         return False
+
+    def _format_type_and_name(self, type_str, name):
+        """Format a type and variable name, handling function pointer types."""
+        # Check if this is a function pointer type (contains "(*)" or ends with ")(*)")
+        # For function pointer types like "int (*)(int, int)", we need to insert the name
+        # to get "int (*name)(int, int)"
+        import re
+
+        # Pattern for function pointer types: return_type (*)(params)
+        # Match patterns like "int (*)(int, int)" or "void (*)(void)"
+        func_ptr_pattern = r'^([^(]+)\(\s*\*\s*\)\s*\(([^)]*)\)$'
+        match = re.match(func_ptr_pattern, type_str.strip())
+        if match:
+            return_type = match.group(1).strip()
+            params = match.group(2).strip()
+            return f"{return_type} (*{name})({params})"
+
+        # Another pattern: "int(*)(int,int)" without spaces
+        func_ptr_pattern2 = r'^([^(]+)\(\*\)\(([^)]*)\)$'
+        match = re.match(func_ptr_pattern2, type_str.strip())
+        if match:
+            return_type = match.group(1).strip()
+            params = match.group(2).strip()
+            return f"{return_type} (*{name})({params})"
+
+        # Not a function pointer type, use normal formatting
+        return f"{type_str} {name}"
 
     def _default_value(self, canon_type_str):
         """Get default value for a type using configuration."""

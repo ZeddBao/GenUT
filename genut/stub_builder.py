@@ -32,16 +32,19 @@ class StubBuilder:
                 for sc in path.stub_constraints:
                     yield func, i, sc
 
-    def stub_func_name(self, callee_name, func_name, path_index):
+    def stub_func_name(self, callee_name, func_name, path_index, is_function_pointer=False):
         """Canonical stub function name."""
-        return f"stub_{callee_name}_{func_name}_{path_index}"
+        if is_function_pointer:
+            return f"stub_ptr_{callee_name}_{func_name}_{path_index}"
+        else:
+            return f"stub_{callee_name}_{func_name}_{path_index}"
 
     def build_stub_declarations(self):
         """Return a list of declaration strings to embed in the .h file."""
         seen = set()
         decls = []
         for func, i, sc in self._iter_stubs():
-            name = self.stub_func_name(sc.callee_name, func.name, i)
+            name = self.stub_func_name(sc.callee_name, func.name, i, sc.is_function_pointer)
             if name in seen:
                 continue
             seen.add(name)
@@ -69,7 +72,7 @@ class StubBuilder:
 
         seen = set()
         for func, i, sc in self._iter_stubs():
-            name = self.stub_func_name(sc.callee_name, func.name, i)
+            name = self.stub_func_name(sc.callee_name, func.name, i, sc.is_function_pointer)
             if name in seen:
                 continue
             seen.add(name)

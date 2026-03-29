@@ -22,6 +22,16 @@ class StubFrameworkBase(ABC):
         """Return the source line that uninstalls a stub after a test call."""
         ...
 
+    @abstractmethod
+    def install_func_ptr_stub(self, var_name: str, stub_func: str, func_type: str) -> str:
+        """Return the source line that installs a function pointer stub."""
+        ...
+
+    @abstractmethod
+    def uninstall_func_ptr_stub(self, var_name: str) -> str:
+        """Return the source line that uninstalls a function pointer stub."""
+        ...
+
 
 class MacroStubFramework(StubFrameworkBase):
     """Stub framework using INSTALL_STUB / UNINSTALL_STUB macros."""
@@ -35,6 +45,12 @@ class MacroStubFramework(StubFrameworkBase):
 
     def uninstall_stub(self, obj_func: str) -> str:
         return f"    UNINSTALL_STUB({obj_func});"
+
+    def install_func_ptr_stub(self, var_name: str, stub_func: str, func_type: str) -> str:
+        return f"    INSTALL_FUNC_PTR_STUB({var_name}, {stub_func});"
+
+    def uninstall_func_ptr_stub(self, var_name: str) -> str:
+        return f"    UNINSTALL_FUNC_PTR_STUB({var_name});"
 
 
 _REGISTRY = {

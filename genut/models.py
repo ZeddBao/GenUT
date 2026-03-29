@@ -1,15 +1,26 @@
 """Data models for UT generation."""
 
+# Function pointer source types
+FUNC_PTR_SOURCE_GLOBAL = "global"      # Global variable
+FUNC_PTR_SOURCE_PARAM = "param"        # Function parameter
+FUNC_PTR_SOURCE_RETURN = "return"      # Return value of another function
+FUNC_PTR_SOURCE_FIELD = "field"        # Structure field
+FUNC_PTR_SOURCE_LOCAL = "local"        # Local variable
 
 class StubConstraint:
     """Describes a stub needed for one test path: which function to replace and what it should return."""
-    def __init__(self, callee_name, return_value, ret_type, params, output_params=None):
+    def __init__(self, callee_name, return_value, ret_type, params, output_params=None,
+                 is_function_pointer=False, pointer_var_name=None, pointer_source_type=None):
         self.callee_name = callee_name    # name of the function to stub
         self.return_value = return_value  # value the stub must return (str) - for non-void functions
         self.ret_type = ret_type          # return type of the callee
         self.params = params              # list of {'name': .., 'type': ..}
         # For void functions that modify parameters: map param_index -> (var_name, value)
         self.output_params = output_params or {}
+        # Function pointer specific fields
+        self.is_function_pointer = is_function_pointer  # True if this is a function pointer stub
+        self.pointer_var_name = pointer_var_name        # Name of the function pointer variable
+        self.pointer_source_type = pointer_source_type  # Source type: global, param, return, field, local
 
 
 class PathConstraint:
