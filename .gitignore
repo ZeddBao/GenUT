@@ -1,3 +1,6 @@
+__pycache__
+.claude
+.cache
 # 项目特定忽略
 utgen.json
 
