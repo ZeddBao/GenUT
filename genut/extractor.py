@@ -378,14 +378,53 @@ class ConstraintExtractor:
         return paths or [PathConstraint()]
 
     def _visit(self, node, ctx, paths, stub_ctx):
-        for child in node.get_children():
+        children = list(node.get_children())
+        i = 0
+        while i < len(children):
+            child = children[i]
             k = child.kind
             if k == clang.CursorKind.SWITCH_STMT:
                 self._handle_switch(child, ctx, paths, stub_ctx)
+                i += 1
             elif k == clang.CursorKind.IF_STMT:
-                self._handle_if(child, ctx, paths, stub_ctx)
+                # 处理if语句，获取否定上下文
+                neg_ctx, neg_stub = self._handle_if(child, ctx, paths, stub_ctx)
+                # 检查是否有隐式else路径
+                has_implicit_else = False
+                for path in paths:
+                    if path.description == "else (implicit)":
+                        has_implicit_else = True
+                        break
+                if has_implicit_else:
+                    # 隐式else路径已添加，但需要为后续的兄弟节点生成路径
+                    # 收集后续的兄弟节点
+                    remaining_children = children[i+1:]
+                    if remaining_children:
+                        # 为隐式else分支创建新的路径列表
+                        implicit_paths = []
+                        # 处理后续兄弟节点，使用否定上下文
+                        for sibling in remaining_children:
+                            self._visit(sibling, neg_ctx, implicit_paths, neg_stub)
+                        # 将隐式路径合并到主路径中
+                        if implicit_paths:
+                            # 找到并更新隐式else路径
+                            for path_idx, path in enumerate(paths):
+                                if path.description == "else (implicit)":
+                                    # 替换隐式else路径为实际生成的路径
+                                    # 实际上，我们需要将隐式路径合并
+                                    # 简单起见，删除隐式else路径，添加实际路径
+                                    del paths[path_idx]
+                                    paths.extend(implicit_paths)
+                                    break
+                        else:
+                            # 没有生成路径，保留隐式else路径
+                            pass
+                    # 跳过已处理的兄弟节点
+                    # 不break，继续处理下一个兄弟节点
+                i += 1
             else:
                 self._visit(child, ctx, paths, stub_ctx)
+                i += 1
 
     def _handle_switch(self, switch_node, ctx, paths, stub_ctx):
         children = list(switch_node.get_children())
@@ -458,6 +497,14 @@ class ConstraintExtractor:
                 else_paths.append(PathConstraint(neg_ctx, "else", expected_return=ret_val,
                                                   stub_constraints=self._build_stub_constraints(neg_stub)))
             paths.extend(else_paths)
+        else:
+            # 隐式else分支：所有条件都为假
+            # 生成一个路径，但期望返回值为None，表示需要继续执行后续代码
+            # 实际的后序代码将由调用者处理
+            paths.append(PathConstraint(neg_ctx, "else (implicit)", expected_return=None,
+                                         stub_constraints=self._build_stub_constraints(neg_stub)))
+        # 返回否定上下文，用于处理隐式else分支的后续代码
+        return neg_ctx, neg_stub
 
     def _build_stub_constraints(self, stub_ctx):
         """Convert stub_ctx {var_name: return_value} to a deduplicated list of StubConstraint."""
@@ -949,7 +996,14 @@ class ConstraintExtractor:
         try:
             n = int(literal.replace(' ', ''), 0)
         except (ValueError, TypeError):
-            return literal if not negate else f"/* not {literal} */"
+            # For non-numeric literals like NULL
+            if op == '!=':
+                # var != literal is true when negate=False
+                # var == literal is true when negate=True
+                # So we need to swap the logic for != operator
+                return f"/* not {literal} */" if not negate else literal
+            else:
+                return literal if not negate else f"/* not {literal} */"
         if negate and op == '==' and hint is not None:
             try:
                 h = int(str(hint).replace(' ', ''), 0)
