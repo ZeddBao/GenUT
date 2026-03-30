@@ -1,47 +1,87 @@
-cmake_minimum_required(VERSION 3.10)
-project(TestCProject C)
+cmake_minimum_required(VERSION 3.14)
+project(TestCProject C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Enable testing
+enable_testing()
 
 # Include directories
 include_directories(${CMAKE_SOURCE_DIR}/include)
 
 # Source files
 set(SOURCES
-    src/math_utils.c
-    src/data_processor.c
-    src/state_machine.c
-    src/sensor.c
-    src/global_ptr_test.c
-    src/stub_test.c
+    src/basic_functions.c
+    src/control_flow.c
+    src/error_handling.c
+    src/func_ptr_test.c
+    src/memory_management.c
+    src/nested_struct_test.c
+    src/param_combo.c
 )
 
 # Header files (for IDE support)
 set(HEADERS
-    include/math_utils.h
-    include/data_processor.h
-    include/state_machine.h
-    include/sensor.h
-    include/global_ptr_test.h
-    include/stub_test.h
+    include/basic_functions.h
+    include/control_flow.h
+    include/error_handling.h
+    include/func_ptr_test.h
+    include/memory_management.h
+    include/nested_struct_test.h
+    include/param_combo.h
 )
 
 # Create library
 add_library(test_c_lib STATIC ${SOURCES} ${HEADERS})
 
-# Create executable
-add_executable(test_c_project src/main.c)
-target_link_libraries(test_c_project test_c_lib)
+# Create a simple executable for testing (optional)
+# add_executable(test_c_project src/main.c)
+# target_link_libraries(test_c_project test_c_lib)
 
 # Add math library (only on Unix/Linux)
 if(UNIX)
-    target_link_libraries(test_c_project m)
+    target_link_libraries(test_c_lib m)
 endif()
+
+# --- Google Test Configuration ---
+include(FetchContent)
+FetchContent_Declare(
+  googletest
+  URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.tar.gz
+)
+# For Windows: prevent overriding the parent project's compiler/linker settings
+set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(googletest)
+
+# --- Test Executables ---
+# Find all test source files
+file(GLOB TEST_SOURCES "test/*.cpp")
+file(GLOB TEST_HEADERS "test/*.h")
+
+# Create test executables
+foreach(test_source ${TEST_SOURCES})
+  get_filename_component(test_name ${test_source} NAME_WE)
+
+  # Skip stub files
+  if(${test_name} MATCHES ".*_stub$")
+    continue()
+  endif()
+
+  add_executable(${test_name} ${test_source} ${TEST_HEADERS})
+  target_link_libraries(${test_name} test_c_lib GTest::gtest GTest::gtest_main)
+  target_include_directories(${test_name} PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+  # Add to CTest
+  add_test(NAME ${test_name} COMMAND ${test_name})
+endforeach()
 
 # Enable compile_commands.json generation
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Installation rules
-install(TARGETS test_c_project DESTINATION bin)
+# Installation rules (optional)
+# install(TARGETS test_c_project DESTINATION bin)
+install(TARGETS test_c_lib DESTINATION lib)
 install(FILES ${HEADERS} DESTINATION include)

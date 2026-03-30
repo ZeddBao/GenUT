@@ -255,7 +255,12 @@ class GTestBuilder:
                     sc.is_function_pointer
                 )
                 if sc.is_function_pointer:
-                    # Function pointer stub
+                    # Function pointer stub - skip local variables as they can't be stubbed from outside
+                    if sc.pointer_source_type == "local":
+                        # Local function pointer variables cannot be stubbed from outside the function
+                        # The stub function for this constraint has not been generated
+                        code.append(f"    // Note: Local function pointer variable '{sc.callee_name}' cannot be stubbed")
+                        continue
                     var_name = sc.pointer_var_name or sc.callee_name
                     code.append(self.stub_framework.install_func_ptr_stub(
                         var_name, stub_name, sc.ret_type
@@ -280,7 +285,10 @@ class GTestBuilder:
             code.append("")
             for sc in path.stub_constraints:
                 if sc.is_function_pointer:
-                    # Function pointer stub
+                    # Function pointer stub - skip local variables as they can't be stubbed from outside
+                    if sc.pointer_source_type == "local":
+                        # Local function pointer variables cannot be stubbed from outside the function
+                        continue
                     var_name = sc.pointer_var_name or sc.callee_name
                     code.append(self.stub_framework.uninstall_func_ptr_stub(var_name))
                 else:

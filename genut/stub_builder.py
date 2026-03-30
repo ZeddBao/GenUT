@@ -30,6 +30,10 @@ class StubBuilder:
         for func in self.funcs_info:
             for i, path in enumerate(func.paths, 1):
                 for sc in path.stub_constraints:
+                    # Skip stub constraints for local function pointer variables
+                    # as they cannot be stubbed from outside the function
+                    if sc.is_function_pointer and sc.pointer_source_type == "local":
+                        continue
                     yield func, i, sc
 
     def stub_func_name(self, callee_name, func_name, path_index, is_function_pointer=False):
@@ -54,6 +58,11 @@ class StubBuilder:
                 param_str = "void"
             decls.append(f"{sc.ret_type} {name}({param_str});")
         return decls
+
+    def _is_function_pointer_type(self, type_str):
+        """Check if a type string represents a function pointer."""
+        # Simple heuristic: function pointer types contain "(*)"
+        return "(*)" in type_str
 
     def build_stub_cpp(self):
         """Generate the full content of the _stub.cpp file."""
@@ -110,12 +119,26 @@ class StubBuilder:
 
             # Return value
             if sc.ret_type != 'void' and sc.return_value:
-                lines.append(f"    return {sc.return_value};")
+                # Clean up comment-like return values (e.g., "/* not NULL */")
+                return_value = sc.return_value.strip()
+                if return_value.startswith("/*") and return_value.endswith("*/"):
+                    # It's a comment, replace with NULL for function pointers
+                    if self._is_function_pointer_type(sc.ret_type):
+                        lines.append("    return NULL;")
+                    else:
+                        lines.append(f"    return {return_value};")  # keep as-is (might cause compilation error)
+                else:
+                    lines.append(f"    return {return_value};")
             elif sc.ret_type == 'void':
                 # void function, no return needed
                 pass
             else:
-                lines.append("    return /* TODO */;")
+                # No return value specified
+                # Check if this is a function pointer type
+                if self._is_function_pointer_type(sc.ret_type):
+                    lines.append("    return NULL;")
+                else:
+                    lines.append("    return /* TODO */;")
 
             lines.append("}")
             lines.append("")
