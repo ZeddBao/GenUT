@@ -997,13 +997,21 @@ class ConstraintExtractor:
             n = int(literal.replace(' ', ''), 0)
         except (ValueError, TypeError):
             # For non-numeric literals like NULL
-            if op == '!=':
-                # var != literal is true when negate=False
-                # var == literal is true when negate=True
-                # So we need to swap the logic for != operator
-                return f"/* not {literal} */" if not negate else literal
+            # Generate valid C++ expressions instead of comments
+            if literal == "NULL":
+                if op == '!=':
+                    # var != NULL is true when negate=False, false when negate=True
+                    return "(void*)1" if not negate else "NULL"
+                else:
+                    # var == NULL or other comparisons
+                    return "NULL" if not negate else "(void*)1"
             else:
-                return literal if not negate else f"/* not {literal} */"
+                # For other literals (string literals, etc.)
+                # Return the literal itself for positive conditions, placeholder for negative
+                if op == '!=':
+                    return f"/* not {literal} */" if not negate else literal
+                else:
+                    return literal if not negate else f"/* not {literal} */"
         if negate and op == '==' and hint is not None:
             try:
                 h = int(str(hint).replace(' ', ''), 0)

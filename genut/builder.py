@@ -171,37 +171,6 @@ class GTestBuilder:
                 code.append(f"#include {inc}")
         code.append("")
 
-        # Add stub macros if using stub framework
-        if self.stub_framework:
-            code.append("// --- Stub Macros ---")
-            code.append("// Note: These macros provide basic stubbing support.")
-            code.append("// For production use, more robust stubbing techniques may be needed.")
-            code.append("#ifndef INSTALL_STUB")
-            code.append("#define INSTALL_STUB(obj_func, stub_func) \\")
-            code.append("    /* Function stubbing not fully supported - use link-time replacement */")
-            code.append("#endif")
-            code.append("")
-            code.append("#ifndef UNINSTALL_STUB")
-            code.append("#define UNINSTALL_STUB(obj_func) \\")
-            code.append("    /* Function unstubbing not fully supported */")
-            code.append("#endif")
-            code.append("")
-            code.append("#ifndef INSTALL_FUNC_PTR_STUB")
-            code.append("#define INSTALL_FUNC_PTR_STUB(var, stub) \\")
-            code.append("    do { \\")
-            code.append("        static __typeof__(var) __saved_##var = var; \\")
-            code.append("        var = stub; \\")
-            code.append("    } while(0)")
-            code.append("#endif")
-            code.append("")
-            code.append("#ifndef UNINSTALL_FUNC_PTR_STUB")
-            code.append("#define UNINSTALL_FUNC_PTR_STUB(var) \\")
-            code.append("    do { \\")
-            code.append("        var = __saved_##var; \\")
-            code.append("    } while(0)")
-            code.append("#endif")
-            code.append("")
-
         code.append(f"class {self.test_suite_name} : public ::testing::Test {{")
         code.append("protected:")
         code.append("    void SetUp() override {}")
@@ -360,13 +329,17 @@ class GTestBuilder:
                 if len(clean_val_dict) == 1 and 'value' in clean_val_dict and not isinstance(clean_val_dict['value'], dict):
                     # This is a scalar value with metadata (type, pointer flag)
                     scalar_value = clean_val_dict['value']
-                    # Convert Python True/False to C true/false
-                    if scalar_value is True:
+                    # Get type information if available from metadata
+                    type_str = fval.get('__type__', "")
+                    # Clean the scalar value (handles comment strings like "/* not NULL */")
+                    cleaned_value = self._clean_scalar_value(scalar_value, type_str)
+                    # Convert Python True/False to C true/false (after cleaning)
+                    if cleaned_value is True:
                         scalar_str = "true"
-                    elif scalar_value is False:
+                    elif cleaned_value is False:
                         scalar_str = "false"
                     else:
-                        scalar_str = str(scalar_value)
+                        scalar_str = str(cleaned_value)
                     code.append(f"{space}{self._build_field_access(var_name, field)} = {scalar_str};")
                     continue  # Skip further processing
 
@@ -376,12 +349,17 @@ class GTestBuilder:
                     # Check if nested dict itself contains just a 'value' key with scalar
                     if len(nested) == 1 and 'value' in nested and not isinstance(nested['value'], dict):
                         scalar_value = nested['value']
-                        if scalar_value is True:
+                        # Get type information if available from metadata
+                        type_str = fval.get('__type__', "")
+                        # Clean the scalar value (handles comment strings like "/* not NULL */")
+                        cleaned_value = self._clean_scalar_value(scalar_value, type_str)
+                        # Convert Python True/False to C true/false (after cleaning)
+                        if cleaned_value is True:
                             scalar_str = "true"
-                        elif scalar_value is False:
+                        elif cleaned_value is False:
                             scalar_str = "false"
                         else:
-                            scalar_str = str(scalar_value)
+                            scalar_str = str(cleaned_value)
                         code.append(f"{space}{self._build_field_access(var_name, field)} = {scalar_str};")
                         continue  # Skip further processing
 
@@ -413,12 +391,16 @@ class GTestBuilder:
                             nested = clean_val_dict['value']
                             if len(nested) == 1 and 'value' in nested and not isinstance(nested['value'], dict):
                                 scalar_value = nested['value']
-                                if scalar_value is True:
+                                # Get type information if available from metadata
+                                type_str = fval.get('__type__', "")
+                                # Clean the scalar value (handles comment strings like "/* not NULL */")
+                                cleaned_value = self._clean_scalar_value(scalar_value, type_str)
+                                if cleaned_value is True:
                                     scalar_str = "true"
-                                elif scalar_value is False:
+                                elif cleaned_value is False:
                                     scalar_str = "false"
                                 else:
-                                    scalar_str = str(scalar_value)
+                                    scalar_str = str(cleaned_value)
                                 code.append(f"{space}{ptr_var_name}.value = {scalar_str};")
                                 # Assign pointer to point to the local variable
                                 code.append(f"{space}{self._build_field_access(var_name, field)} = &{ptr_var_name};")
@@ -434,12 +416,15 @@ class GTestBuilder:
                                 code.extend(nested_code)
                             else:
                                 # Scalar field under pointer
-                                if subval is True:
+                                # Clean the scalar value (handles comment strings like "/* not NULL */")
+                                # Type info not available here, pass empty string
+                                cleaned_subval = self._clean_scalar_value(subval, "")
+                                if cleaned_subval is True:
                                     subval_str = "true"
-                                elif subval is False:
+                                elif cleaned_subval is False:
                                     subval_str = "false"
                                 else:
-                                    subval_str = str(subval)
+                                    subval_str = str(cleaned_subval)
                                 code.append(f"{space}{self._build_field_access(ptr_var_name, subfield)} = {subval_str};")
 
                         # Assign pointer to point to the local variable
@@ -452,13 +437,16 @@ class GTestBuilder:
                         code.extend(nested_code)
             else:
                 # Scalar value assignment
-                # Convert Python True/False to C true/false
-                if fval is True:
+                # Clean the scalar value (handles comment strings like "/* not NULL */")
+                # Type info not available here, pass empty string
+                cleaned_fval = self._clean_scalar_value(fval, "")
+                # Convert Python True/False to C true/false (after cleaning)
+                if cleaned_fval is True:
                     fval_str = "true"
-                elif fval is False:
+                elif cleaned_fval is False:
                     fval_str = "false"
                 else:
-                    fval_str = str(fval)
+                    fval_str = str(cleaned_fval)
                 code.append(f"{space}{self._build_field_access(var_name, field)} = {fval_str};")
         return code
 
@@ -587,6 +575,9 @@ class GTestBuilder:
             code.append(f"    {ptype} {pname} = &{local};")
         else:
             scalar = val if (val is not None and not isinstance(val, dict)) else self._default_value(canon_type)
+            # Clean comment-like values
+            if isinstance(scalar, str):
+                scalar = self._clean_scalar_value(scalar, canon_type)
             if is_func_ptr:
                 # Format function pointer type correctly: "int (*)(int, int)" -> "int (*pname)(int, int)"
                 formatted = self._format_param_type(ptype, pname)
@@ -681,3 +672,41 @@ class GTestBuilder:
 
         # Default to struct/empty initializer
         return cfg.struct_default
+
+    def _clean_scalar_value(self, value, canon_type_str=""):
+        """Clean scalar values that may be comments (e.g., '/* not NULL */') into valid C++ expressions."""
+        if not isinstance(value, str):
+            return value
+
+        value_str = value.strip()
+
+        # Check if it's a comment like "/* not X */"
+        if value_str.startswith("/*") and value_str.endswith("*/"):
+            # Extract the inner content
+            inner = value_str[2:-2].strip()
+            # Check for common patterns
+            if inner.startswith("not "):
+                expr = inner[4:].strip()
+                # Handle specific patterns
+                if expr == "NULL":
+                    # For pointers, return a non-NULL value
+                    # If type info is not available, assume it's a pointer (common case)
+                    if '*' in canon_type_str or '(*)' in canon_type_str or canon_type_str == "":
+                        return "(void*)1"
+                    else:
+                        return "1"  # Default integer
+                elif "== NULL" in expr:
+                    # "not X == NULL" means X != NULL, return non-NULL
+                    return "(void*)1"
+                elif "!= NULL" in expr:
+                    # "not X != NULL" means X == NULL, return NULL
+                    return "NULL"
+                else:
+                    # Generic case: return a placeholder
+                    return f"/* TODO: {inner} */"
+            else:
+                # Some other comment, return NULL as safe default for pointers
+                return "NULL"
+
+        # Not a comment, return as-is
+        return value_str
