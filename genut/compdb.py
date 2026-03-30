@@ -3,6 +3,7 @@
 import os
 import subprocess
 import json
+import shlex
 
 
 class CompDbParser:
@@ -92,6 +93,27 @@ class CompDbParser:
 
         return includes
 
+    def _expand_response_files(self, args):
+        """Expand response files (arguments starting with '@') in args list."""
+        expanded = []
+        for arg in args:
+            if arg.startswith('@'):
+                resp_file = arg[1:]
+                if not os.path.isabs(resp_file):
+                    # Make relative to compilation database directory
+                    resp_file = os.path.join(self.compdb_dir, resp_file)
+                try:
+                    with open(resp_file, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                        # Use shlex to properly split while preserving quotes
+                        expanded.extend(shlex.split(content))
+                except Exception as e:
+                    print(f"Warning: Failed to expand response file {resp_file}: {e}")
+                    expanded.append(arg)  # Keep original argument
+            else:
+                expanded.append(arg)
+        return expanded
+
     def get_args_for_file(self, source_file):
         """Get compilation arguments for a specific source file."""
         import clang.cindex as clang
@@ -118,4 +140,6 @@ class CompDbParser:
             pass
 
         args.extend(self._get_system_includes())
+        # Expand response files
+        args = self._expand_response_files(args)
         return args

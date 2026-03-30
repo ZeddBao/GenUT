@@ -50,5 +50,22 @@ class FunctionInfo:
         if not self.params:
             param_str = "void"
         else:
-            param_str = ", ".join([f"{p['type']} {p['name']}" for p in self.params])
+            param_parts = []
+            for p in self.params:
+                param_type = p['type']
+                param_name = p['name']
+                # Handle array types: convert "int[10] arr" to "int arr[10]"
+                if '[' in param_type and ']' in param_type:
+                    # Extract the array part
+                    type_parts = param_type.split('[')
+                    if len(type_parts) == 2:
+                        base_type = type_parts[0].strip()
+                        array_part = '[' + type_parts[1]
+                        param_parts.append(f"{base_type} {param_name}{array_part}")
+                    else:
+                        # Complex case with multiple brackets, keep as is
+                        param_parts.append(f"{param_type} {param_name}")
+                else:
+                    param_parts.append(f"{param_type} {param_name}")
+            param_str = ", ".join(param_parts)
         return f"{self.ret_type} {self.name}({param_str});"

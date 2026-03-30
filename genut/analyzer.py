@@ -42,6 +42,15 @@ class CSourceAnalyzer:
 
         index = clang.Index.create()
         options = clang.TranslationUnit.PARSE_DETAILED_PROCESSING_RECORD
+        # Ensure include directory is present (temporary fix for test project)
+        include_dir = os.path.join(self.project_root, "test_c_project/include")
+        if os.path.isdir(include_dir):
+            args = list(self.compile_args)
+            include_arg = f"-I{include_dir}"
+            if include_arg not in args:
+                args.append(include_arg)
+                print(f"[DEBUG] Added include path: {include_arg}")
+            self.compile_args = args
         tu = index.parse(self.source_file, args=self.compile_args, options=options)
 
         funcs_info = []
@@ -64,6 +73,8 @@ class CSourceAnalyzer:
                             param_name = arg.spelling if arg.spelling else f"arg_{len(params)}"
                             param_type = arg.type.spelling
                             canon_type = arg.type.get_canonical().spelling
+
+
                             params.append({
                                 "name": param_name,
                                 "type": param_type,

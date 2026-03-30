@@ -179,6 +179,29 @@ class GTestBuilder:
         code.append("")
         return code
 
+    def _build_global_var_save(self, global_vars):
+        """Generate code to save original values of global variables."""
+        code = []
+        if not global_vars:
+            return code
+        code.append("    // Save original global variable values")
+        for g_name, g_info in global_vars.items():
+            # Use __typeof__ for all types for simplicity and safety
+            code.append(f"    __typeof__({g_name}) saved_{g_name} = {g_name};")
+        code.append("")
+        return code
+
+    def _build_global_var_restore(self, global_vars):
+        """Generate code to restore original values of global variables."""
+        code = []
+        if not global_vars:
+            return code
+        code.append("    // Restore original global variable values")
+        for g_name in global_vars:
+            code.append(f"    {g_name} = saved_{g_name};")
+        code.append("")
+        return code
+
     def _build_test_case(self, func, path, path_index):
         """Build a single test case."""
         code = []
@@ -188,6 +211,10 @@ class GTestBuilder:
         test_name = self._format_test_name(func.name, path_index)
         desc = f"  // {path.description}" if path.description else ""
         code.append(f"TEST_F({self.test_suite_name}, {test_name}) {{{desc}")
+
+        # Save global variables before any modifications
+        if func.global_vars:
+            code.extend(self._build_global_var_save(func.global_vars))
 
         # Install stubs before any setup
         if self.stub_framework and self.stub_builder and path.stub_constraints:
@@ -228,6 +255,10 @@ class GTestBuilder:
                 else:
                     # Direct function stub
                     code.append(self.stub_framework.uninstall_stub(sc.callee_name))
+
+        # Restore global variables after test
+        if func.global_vars:
+            code.extend(self._build_global_var_restore(func.global_vars))
 
         code.append("}")
         code.append("")
