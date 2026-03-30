@@ -217,8 +217,15 @@ class GTestBuilder:
             return code
         code.append("    // Save original global variable values")
         for g_name, g_info in global_vars.items():
-            # Use __typeof__ for all types for simplicity and safety
-            code.append(f"    __typeof__({g_name}) saved_{g_name} = {g_name};")
+            g_type = g_info['type']
+            # Check if this is an array type (contains '[')
+            is_array = '[' in g_type and ']' in g_type
+            if is_array:
+                # Arrays cannot be assigned - generate comment instead
+                code.append(f"    // Note: Global array '{g_name}' cannot be saved/restored automatically")
+            else:
+                # Use __typeof__ for all types for simplicity and safety
+                code.append(f"    __typeof__({g_name}) saved_{g_name} = {g_name};")
         code.append("")
         return code
 
@@ -228,8 +235,16 @@ class GTestBuilder:
         if not global_vars:
             return code
         code.append("    // Restore original global variable values")
-        for g_name in global_vars:
-            code.append(f"    {g_name} = saved_{g_name};")
+        for g_name, g_info in global_vars.items():
+            g_type = g_info['type']
+            # Check if this is an array type (contains '[')
+            is_array = '[' in g_type and ']' in g_type
+            if is_array:
+                # Arrays cannot be assigned - skip restoration
+                # (save code would have already skipped it)
+                pass
+            else:
+                code.append(f"    {g_name} = saved_{g_name};")
         code.append("")
         return code
 
@@ -456,8 +471,10 @@ class GTestBuilder:
             canon_type = g_info['canonical_type']
             is_ptr = '*' in canon_type
 
-            # Check if this is a function pointer type (heuristic: contains "(*)" or ")(*")
-            is_func_ptr = ('(*)' in g_type) or (')(*' in g_type)
+            # Check if this is a function pointer type (heuristic: contains "(*)" or ")(*" or "(*[")
+            is_func_ptr = ('(*)' in g_type) or (')(*' in g_type) or ('(*[' in g_type)
+            # Check if this is an array type (contains '[')
+            is_array = '[' in g_type and ']' in g_type
 
             if is_ptr and not is_func_ptr:
                 base_type = g_type.replace('*', '').replace('const', '').strip()
@@ -477,7 +494,16 @@ class GTestBuilder:
                     code.append(f"    {base_type} {local} = {{}};")
                     code.append(f"    {g_name} = &{local};")
             else:
-                if val is not None:
+                # Handle array types specially - array names cannot be assigned
+                if is_array:
+                    if val is not None:
+                        # Array with a constraint value - this is problematic
+                        code.append(f"    // WARNING: Global array '{g_name}' has constraint '{val}' but array assignment is not supported")
+                        code.append(f"    // TODO: Manually initialize array elements if needed")
+                    else:
+                        # No constraint - just add a comment
+                        code.append(f"    // Global array '{g_name}' - initialize elements manually if needed")
+                elif val is not None:
                     if isinstance(val, dict):
                         code.append(f"    {g_name} = {{}}; // Reset struct to avoid interference")
                         # Generate field assignments (supports nested dictionaries)
@@ -492,6 +518,33 @@ class GTestBuilder:
         if global_vars:
             code.append("")
         return code
+
+    def _format_param_type(self, param_type, param_name):
+        """Format a parameter type with name, handling function pointers correctly."""
+        # Handle function pointer types like "int (*)(int, int)" -> "int (*param_name)(int, int)"
+        if '(*)' in param_type:
+            # Simple function pointer: replace "(*)" with "(*param_name)"
+            return param_type.replace('(*)', f'(*{param_name})')
+        # Handle array of function pointers like "int (*[4])(int, int)" -> "int (*param_name[4])(int, int)"
+        elif '(*[' in param_type:
+            # Find the closing bracket after the opening [
+            import re
+            pattern = r'\(\*\[([^\]]+)\]\)'
+            match = re.search(pattern, param_type)
+            if match:
+                array_size = match.group(1)
+                # Replace "(*[4])" with "(*param_name[4])"
+                return param_type.replace(f'(*[{array_size}])', f'(*{param_name}[{array_size}])')
+        # Handle array types: convert "int[10] arr" to "int arr[10]"
+        elif '[' in param_type and ']' in param_type:
+            # Extract the array part
+            type_parts = param_type.split('[')
+            if len(type_parts) == 2:
+                base_type = type_parts[0].strip()
+                array_part = '[' + type_parts[1]
+                return f"{base_type} {param_name}{array_part}"
+        # Default: just type followed by name
+        return f"{param_type} {param_name}"
 
     def _build_param_init(self, param, param_values, path_index):
         """Build parameter initialization code."""
@@ -508,8 +561,8 @@ class GTestBuilder:
         is_ptr = '*' in ptype
         is_struct_like = isinstance(val, dict) and not self._is_basic_type(canon_type)
 
-        # Check if this is a function pointer type (heuristic: contains "(*)" or ")(*")
-        is_func_ptr = ('(*)' in ptype) or (')(*' in ptype)
+        # Check if this is a function pointer type (heuristic: contains "(*)" or ")(*" or "(*[")
+        is_func_ptr = ('(*)' in ptype) or (')(*' in ptype) or ('(*[' in ptype)
 
         if is_struct_like:
             base_type = ptype.replace('*', '').replace('const', '').strip()
@@ -534,7 +587,12 @@ class GTestBuilder:
             code.append(f"    {ptype} {pname} = &{local};")
         else:
             scalar = val if (val is not None and not isinstance(val, dict)) else self._default_value(canon_type)
-            code.append(f"    {ptype} {pname} = {scalar};")
+            if is_func_ptr:
+                # Format function pointer type correctly: "int (*)(int, int)" -> "int (*pname)(int, int)"
+                formatted = self._format_param_type(ptype, pname)
+                code.append(f"    {formatted} = {scalar};")
+            else:
+                code.append(f"    {ptype} {pname} = {scalar};")
         return code
 
     def _build_func_call_and_assert(self, func, path, path_index):
@@ -547,7 +605,9 @@ class GTestBuilder:
             code.append(f"    {call_str}")
             return code
 
-        code.append(f"    {func.ret_type} result = {call_str}")
+        # Format return type with variable name, handling function pointer types
+        formatted_decl = self._format_type_and_name(func.ret_type, "result")
+        code.append(f"    {formatted_decl} = {call_str}")
 
         if not self.construct or path.expected_return is None:
             code.append(f"    // EXPECT_EQ(result, /* expected for path {path_index} */);")

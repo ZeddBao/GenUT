@@ -45,6 +45,33 @@ class FunctionInfo:
         # {name: {'type': type_str, 'canonical_type': canon_type_str}}
         self.global_vars = {}
 
+    def _format_param_type(self, param_type, param_name):
+        """Format a parameter type with name, handling function pointers correctly."""
+        # Handle function pointer types like "int (*)(int, int)" -> "int (*param_name)(int, int)"
+        if '(*)' in param_type:
+            # Simple function pointer: replace "(*)" with "(*param_name)"
+            return param_type.replace('(*)', f'(*{param_name})')
+        # Handle array of function pointers like "int (*[4])(int, int)" -> "int (*param_name[4])(int, int)"
+        elif '(*[' in param_type:
+            # Find the closing bracket after the opening [
+            import re
+            pattern = r'\(\*\[([^\]]+)\]\)'
+            match = re.search(pattern, param_type)
+            if match:
+                array_size = match.group(1)
+                # Replace "(*[4])" with "(*param_name[4])"
+                return param_type.replace(f'(*[{array_size}])', f'(*{param_name}[{array_size}])')
+        # Handle array types: convert "int[10] arr" to "int arr[10]"
+        elif '[' in param_type and ']' in param_type:
+            # Extract the array part
+            type_parts = param_type.split('[')
+            if len(type_parts) == 2:
+                base_type = type_parts[0].strip()
+                array_part = '[' + type_parts[1]
+                return f"{base_type} {param_name}{array_part}"
+        # Default: just type followed by name
+        return f"{param_type} {param_name}"
+
     def get_declaration(self):
         """Generate C language declaration for the function."""
         if not self.params:
@@ -54,18 +81,15 @@ class FunctionInfo:
             for p in self.params:
                 param_type = p['type']
                 param_name = p['name']
-                # Handle array types: convert "int[10] arr" to "int arr[10]"
-                if '[' in param_type and ']' in param_type:
-                    # Extract the array part
-                    type_parts = param_type.split('[')
-                    if len(type_parts) == 2:
-                        base_type = type_parts[0].strip()
-                        array_part = '[' + type_parts[1]
-                        param_parts.append(f"{base_type} {param_name}{array_part}")
-                    else:
-                        # Complex case with multiple brackets, keep as is
-                        param_parts.append(f"{param_type} {param_name}")
-                else:
-                    param_parts.append(f"{param_type} {param_name}")
+                param_parts.append(self._format_param_type(param_type, param_name))
             param_str = ", ".join(param_parts)
-        return f"{self.ret_type} {self.name}({param_str});"
+
+        # Check if return type is a function pointer (contains "(*)" )
+        if "(*)" in self.ret_type:
+            # Function returning a function pointer: format as "int (*func_name(params))(func_params)"
+            # Replace "(*)" with "(*{self.name}({param_str}))"
+            # Example: "int (*)(int, int)" -> "int (*get_operation(char op))(int, int)"
+            return self.ret_type.replace("(*)", f"(*{self.name}({param_str}))") + ";"
+        else:
+            # Normal function declaration
+            return f"{self.ret_type} {self.name}({param_str});"

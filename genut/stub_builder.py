@@ -53,16 +53,55 @@ class StubBuilder:
                 continue
             seen.add(name)
             if sc.params:
-                param_str = ", ".join(f"{p['type']} {p['name']}" for p in sc.params)
+                param_str = ", ".join(self._format_param_type(p['type'], p['name']) for p in sc.params)
             else:
                 param_str = "void"
-            decls.append(f"{sc.ret_type} {name}({param_str});")
+            # Use _format_function_declaration for correct function pointer return type formatting
+            decls.append(f"{self._format_function_declaration(sc.ret_type, name, param_str)};")
         return decls
 
     def _is_function_pointer_type(self, type_str):
         """Check if a type string represents a function pointer."""
         # Simple heuristic: function pointer types contain "(*)"
         return "(*)" in type_str
+
+    def _format_param_type(self, param_type, param_name):
+        """Format a parameter type with name, handling function pointers correctly."""
+        # Handle function pointer types like "int (*)(int, int)" -> "int (*param_name)(int, int)"
+        if '(*)' in param_type:
+            # Simple function pointer: replace "(*)" with "(*param_name)"
+            return param_type.replace('(*)', f'(*{param_name})')
+        # Handle array of function pointers like "int (*[4])(int, int)" -> "int (*param_name[4])(int, int)"
+        elif '(*[' in param_type:
+            # Find the closing bracket after the opening [
+            import re
+            pattern = r'\(\*\[([^\]]+)\]\)'
+            match = re.search(pattern, param_type)
+            if match:
+                array_size = match.group(1)
+                # Replace "(*[4])" with "(*param_name[4])"
+                return param_type.replace(f'(*[{array_size}])', f'(*{param_name}[{array_size}])')
+        # Handle array types: convert "int[10] arr" to "int arr[10]"
+        elif '[' in param_type and ']' in param_type:
+            # Extract the array part
+            type_parts = param_type.split('[')
+            if len(type_parts) == 2:
+                base_type = type_parts[0].strip()
+                array_part = '[' + type_parts[1]
+                return f"{base_type} {param_name}{array_part}"
+        # Default: just type followed by name
+        return f"{param_type} {param_name}"
+
+    def _format_function_declaration(self, ret_type, func_name, param_str):
+        """Format a function declaration, handling function pointer return types."""
+        # Check if return type is a function pointer (contains "(*)" )
+        if "(*)" in ret_type:
+            # Function returning a function pointer: format as "int (*func_name(params))(func_params)"
+            # Replace "(*)" with "(*{func_name}({param_str}))"
+            return ret_type.replace("(*)", f"(*{func_name}({param_str}))")
+        else:
+            # Normal function declaration
+            return f"{ret_type} {func_name}({param_str})"
 
     def build_stub_cpp(self):
         """Generate the full content of the _stub.cpp file."""
@@ -94,10 +133,11 @@ class StubBuilder:
 
             # Function signature
             if sc.params:
-                param_str = ", ".join(f"{p['type']} {p['name']}" for p in sc.params)
+                param_str = ", ".join(self._format_param_type(p['type'], p['name']) for p in sc.params)
             else:
                 param_str = "void"
-            lines.append(f"{sc.ret_type} {name}({param_str}) {{")
+            # Use _format_function_declaration for correct function pointer return type formatting
+            lines.append(f"{self._format_function_declaration(sc.ret_type, name, param_str)} {{")
 
             # Suppress unused parameter warnings
             for p in sc.params:
