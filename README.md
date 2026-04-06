@@ -1,518 +1,162 @@
 # genut: C 语言单元测试生成器
 
-一个基于 libclang 的 Python 工具，用于解析 C 源文件并生成 Google Test (GTest) 单元测试骨架。它能提取函数签名、计算圈复杂度、识别分支路径（if/else、switch/case），并生成带参数约束的测试用例。
+基于 **libclang** 的 Python 工具，用于解析 C 源文件并生成 Google Test（GTest）单元测试骨架。支持函数签名提取、分支路径约束提取、圈复杂度驱动的用例生成，以及可选的 stub 代码生成。
 
-## 特性
+## 主要能力
 
-- **基于 AST 的分析**：使用 libclang 解析 C 源代码，获取完整的类型信息
-- **路径约束提取**：自动从 if/switch 分支条件中提取参数约束
-- **可配置架构**：项目特定定制化功能（命名、默认值、编译器）与核心逻辑解耦
-- **编译数据库支持**：使用 `compile_commands.json` 获取准确的编译参数
-- **圈复杂度计算**：根据函数复杂度生成适当数量的测试用例
-- **模块化设计**：关注点分离，支持配置注入
-- **打桩器支持**：自动检测函数调用，生成 stub 函数，支持抽象打桩框架，处理函数返回值和输出参数约束
-- **版权头生成**：可配置的版权声明，自动添加到所有生成文件的开头
-- **额外头文件包含**：支持用户指定额外的头文件，自动包含在所有生成文件中
-
-## 快速开始
-
-### 1. 安装依赖
-
-```bash
-pip install libclang
-```
-
-### 2. 准备编译数据库
-
-确保你的 C 项目有 `compile_commands.json` 文件：
-
-```bash
-# 对于 CMake 项目
-cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ..
-
-# 对于 Make 项目（使用 Bear）
-bear -- make
-```
-
-### 3. 生成单元测试
-
-```bash
-# 为源文件生成测试
-python gen_ut.py --compdb compile_commands.json --src src/math_utils.c
-
-# 使用自定义配置
-python gen_ut.py --config utgen.json --compdb compile_commands.json --src src/math_utils.c
-```
-
-### 4. 编译和运行测试
-
-```bash
-# 使用 GTest 编译
-g++ -std=c++11 -I. -I/path/to/gtest/include ut_math_utils.cpp \
-    -L/path/to/gtest/lib -lgtest -lgtest_main -o math_utils_test
-
-# 运行测试
-./math_utils_test
-```
-
-## 架构
-
-该工具经过重构，采用模块化架构，明确分离了通用 UT 生成功能和项目特定定制化功能：
-
-```plain
-genut/
-├── gen_ut.py           # 主入口脚本
-├── config.py           # 配置类（GeneratorConfig、NamingConfig、DefaultValueConfig）
-├── models.py           # 数据模型（PathConstraint、FunctionInfo）
-├── compdb.py           # 编译数据库解析器，支持编译器自动检测
-├── analyzer.py         # C 源代码分析器（使用 libclang）
-├── extractor.py        # 函数 AST 约束提取器
-├── builder.py          # GTest 构建器，支持可配置命名和默认值
-├── stub_framework.py   # 抽象打桩框架定义
-├── stub_builder.py     # stub 函数声明和实现生成器
-├── CLAUDE.md           # Claude Code 项目说明
-└── test_c_project/     # 测试用的示例 C 项目
-```
-
-### 核心组件
-
-| 组件 | 职责 |
-| ------ | ------ |
-| **CompDbParser** | 解析 `compile_commands.json`，提取编译参数，支持编译器自动检测 |
-| **CSourceAnalyzer** | 使用 libclang 解析 C 源代码，提取函数信息 |
-| **ConstraintExtractor** | 提取 if/switch 分支条件，生成路径约束 |
-| **GTestBuilder** | 生成 GTest 兼容的 `.cpp` 和 `.h` 文件，支持可配置命名和默认值 |
-| **StubFramework** | 抽象打桩框架，支持不同的打桩实现方式 |
-| **StubBuilder** | 生成 stub 函数声明和实现，处理函数返回值和输出参数约束 |
-| **UTGeneratorApp** | 主入口点，处理 CLI 参数 |
+- 基于 AST 的 C 代码分析（类型信息更准确）
+- 从 `if / else / switch` 提取路径约束
+- 支持按函数过滤生成（`--funcs`）
+- 支持从分支条件构造参数（`--construct`）
+- 支持 `compile_commands.json`，兼容真实编译参数
+- 支持可配置命名、默认值、版权头、额外 include
+- 支持宏式 stub 框架（`--stub-framework macro`）
 
 ## 安装
 
-### 系统要求
+### 依赖
 
 - Python 3.7+
-- LLVM/Clang 安装，包含 libclang DLL/库文件
-- Python 包：`clang`（libclang Python 绑定）
+- LLVM/Clang（需可访问 libclang 动态库）
+- Python 包：
 
 ```bash
 pip install libclang
 ```
 
-### 系统特定安装
-
-- **Windows**：从 [llvm.org](https://llvm.org/) 安装 LLVM 或使用 Chocolatey：`choco install llvm`
-- **Linux**：使用包管理器安装：`sudo apt-get install clang libclang-dev`
-- **macOS**：使用 Homebrew 安装：`brew install llvm`
-
-确保 libclang 库路径在系统 PATH 中，或设置 `LIBCLANG_PATH` 环境变量。
-
-## 使用方法
-
-### 基本用法
+### 生成编译数据库
 
 ```bash
-# 为 C 源文件生成测试
-python gen_ut.py --compdb <compile_commands.json> --src <source_file.c>
+# CMake
+cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ..
+
+# Make（使用 Bear）
+bear -- make
+```
+
+## 快速开始
+
+```bash
+# 基础生成
+python gen_ut.py --compdb compile_commands.json --src src/basic_functions.c
+
+# 仅针对指定函数
+python gen_ut.py --compdb compile_commands.json --src src/basic_functions.c --funcs "add;sub"
 
 # 从分支条件构造参数
-python gen_ut.py --compdb compile_commands.json --src src/file.c --construct
+python gen_ut.py --compdb compile_commands.json --src src/control_flow.c --construct
 
-# 输出到指定目录
-python gen_ut.py --compdb compile_commands.json --src src/file.c --outdir test/
-
-# 仅针对特定函数
-python gen_ut.py --compdb compile_commands.json --src src/file.c --funcs "func1;func2"
-
-# 指定项目根目录以便正确识别内部头文件
-python gen_ut.py --compdb compile_commands.json --src src/file.c --project-root /path/to/project
-
-# 使用宏式打桩器（生成 stub 函数）
-python gen_ut.py --compdb compile_commands.json --src src/file.c --construct --stub-framework macro
+# 启用宏式 stub 生成
+python gen_ut.py --compdb compile_commands.json --src src/stub_dependency.c --construct --stub-framework macro
 ```
 
-### 命令行选项
+## 命令行参数
 
-| 选项 | 描述 |
-| ------ | ------ |
-| `--compdb` | `compile_commands.json` 文件路径（必需） |
+| 参数 | 说明 |
+|---|---|
+| `--compdb` | `compile_commands.json` 路径（必需） |
 | `--src` | C 源文件路径（必需） |
-| `--funcs` | 目标函数列表，分号分隔。留空表示所有函数。 |
-| `--outdir` | 生成文件的输出目录。默认为源文件所在目录。 |
-| `--construct` | 从分支条件构造测试参数。 |
-| `--project-root` | 显式指定项目根目录，以便正确识别内部头文件。 |
-| `--config, -c` | JSON 配置文件路径，用于自定义命名、默认值等。 |
-| `--compiler` | 用于系统包含路径检测的编译器（auto、gcc 或 clang）。 |
-| `--stub-framework` | 指定打桩框架，当前支持 "macro"。留空表示不打桩。 |
+| `--funcs` | 目标函数列表，分号分隔；空表示全部 |
+| `--outdir` | 输出目录；默认源文件所在目录 |
+| `--construct` | 从分支条件构造参数 |
+| `--project-root` | 显式指定项目根目录（用于内部头文件识别） |
+| `--config`, `-c` | JSON 配置文件路径 |
+| `--compiler` | 系统 include 路径检测编译器：`auto` / `gcc` / `clang` |
+| `--stub-framework` | 打桩框架（当前支持 `macro`） |
 
-## 配置
+## 配置（utgen.json）
 
-该工具支持 JSON 配置文件，可为不同项目自定义行为。可自定义的内容包括：
+支持的核心配置项：
 
-- **命名约定**：文件前缀/后缀、测试套件后缀、测试名称模式
-- **默认值**：类型特定的默认值（int、float、指针、结构体、自定义类型）
-- **编译器选择**：自动或显式编译器检测，用于系统包含路径
-- **类型识别**：可扩展的基本类型关键字列表
-- **版权头信息**：自定义版权声明，将添加到生成的每个文件头部
-- **额外头文件**：用户指定的额外头文件，将包含在生成的测试文件中
+- `naming`：文件前后缀、suite 后缀、测试名模板
+- `default_values`：基础类型与自定义类型默认值
+- `basic_type_keywords`：基本类型关键字扩展
+- `compiler`：编译器检测策略
+- `copyright_header`
+- `extra_includes`
 
-### 配置文件示例
-
-创建 `utgen.json`：
+示例：
 
 ```json
 {
-    "naming": {
-        "file_prefix": "test_",
-        "file_suffix": "",
-        "suite_suffix": "UT",
-        "test_name_pattern": "{func}_Path{index}"
-    },
-    "default_values": {
-        "int_default": "0",
-        "float_default": "0.0",
-        "pointer_default": "NULL",
-        "struct_default": "{}",
-        "bool_default": "false",
-        "custom_type_defaults": {
-            "MyString": "\"\"",
-            "Handle": "INVALID_HANDLE_VALUE"
-        }
-    },
-    "basic_type_keywords": [
-        "int", "char", "float", "double", "long", "short",
-        "bool", "size_t", "unsigned", "signed", "uint8_t", "uint16_t",
-        "uint32_t", "uint64_t", "int8_t", "int16_t", "int32_t", "int64_t"
-    ],
-    "compiler": "auto",
-    "copyright_header": [
-        "// Copyright (c) 2026 Your Company Name. All rights reserved.",
-        "// Generated by genut - C unit test generator",
-        "// DO NOT EDIT THIS FILE MANUALLY"
-    ],
-    "extra_includes": [
-        "<test_helpers.h>",
-        "\"project_test_macros.h\""
-    ]
-}
-```
-
-### 配置字段说明
-
-| 字段 | 类型 | 描述 | 默认值 |
-|------|------|------|--------|
-| `naming.file_prefix` | 字符串 | 生成文件的前缀 | `"ut_"` |
-| `naming.file_suffix` | 字符串 | 生成文件的后缀 | `""` |
-| `naming.suite_suffix` | 字符串 | 测试套件类的后缀 | `"Test"` |
-| `naming.test_name_pattern` | 字符串 | 测试用例命名模式，可用变量：`{func}`（函数名）、`{index}`（路径索引） | `"{func}_Path{index}"` |
-| `default_values.int_default` | 字符串 | int 类型参数的默认值 | `"0"` |
-| `default_values.float_default` | 字符串 | float/double 类型参数的默认值 | `"0.0"` |
-| `default_values.pointer_default` | 字符串 | 指针类型参数的默认值 | `"nullptr"` |
-| `default_values.struct_default` | 字符串 | 结构体类型参数的默认值 | `"{}"` |
-| `default_values.bool_default` | 字符串 | bool 类型参数的默认值 | `"false"` |
-| `default_values.custom_type_defaults` | 对象 | 自定义类型的默认值映射 | `{}` |
-| `basic_type_keywords` | 字符串数组 | 基本类型关键字列表，用于类型识别 | 常见 C 类型 |
-| `compiler` | 字符串 | 编译器检测模式："auto"、"gcc" 或 "clang" | `"auto"` |
-| `copyright_header` | 字符串数组 | 版权声明行，将添加到每个生成文件的顶部 | `[]` |
-| `extra_includes` | 字符串数组 | 额外的头文件包含，将添加到所有生成文件中 | `[]` |
-
-**注意**：
-- `extra_includes` 支持系统包含（`<header.h>`）和本地包含（`"header.h"`）
-- `copyright_header` 的每一行都会原样添加到生成文件的开头
-- `custom_type_defaults` 的键是类型名称，值是默认值的 C 表达式
-
-### 使用配置
-
-```bash
-python gen_ut.py --config utgen.json --compdb compile_commands.json --src src/file.c
-```
-
-## Stub框架
-
-genut 提供了一个可扩展的打桩框架，用于替换被测试函数中调用的外部函数。这对于测试依赖外部函数返回值的代码路径特别有用。
-
-### 工作原理
-
-1. **函数调用检测**：分析器检测被测试函数中的函数调用，并记录调用信息（函数名、返回类型、参数）
-2. **约束提取**：当函数调用结果用于条件判断时（如 `if (validate_input(x) > 0)`），提取器会计算满足分支条件所需的返回值
-3. **Stub生成**：为每个需要打桩的路径生成独立的 stub 函数，返回特定值以满足路径条件
-4. **测试集成**：在生成的测试用例中插入 `INSTALL_STUB` 和 `UNINSTALL_STUB` 宏，在测试执行期间替换原函数
-
-### 宏式打桩器（当前实现）
-
-genut 目前实现了基于宏的打桩框架：
-
-```c
-// 在测试用例中使用
-INSTALL_STUB(original_function, stub_function);  // 安装 stub
-// ... 调用被测试函数 ...
-UNINSTALL_STUB(original_function);               // 卸载 stub
-```
-
-生成的 stub 函数示例：
-```cpp
-int32_t stub_validate_input_test_function_1(int32_t input) {
-    (void)input;  // 抑制未使用参数警告
-    return 42;    // 返回满足路径条件的值
-}
-```
-
-### 创建自定义打桩框架
-
-你可以通过继承 `StubFrameworkBase` 类创建自定义打桩框架：
-
-```python
-from genut.stub_framework import StubFrameworkBase
-
-class MyCustomStubFramework(StubFrameworkBase):
-    name = "custom"
-
-    def install_stub(self, obj_func, stub_func):
-        return f"    MY_INSTALL({obj_func}, {stub_func});"
-
-    def uninstall_stub(self, obj_func):
-        return f"    MY_UNINSTALL({obj_func});"
-```
-
-然后在 `get_stub_framework()` 函数中注册你的实现。
-
-### 输出文件
-
-当使用 `--stub-framework` 参数时，会生成三个文件：
-
-1. `<前缀><模块>.h` - 包含原函数声明和 stub 函数声明
-2. `<前缀><模块>.cpp` - 包含测试用例，其中有 `INSTALL_STUB`/`UNINSTALL_STUB` 调用
-3. `<前缀><模块>_stub.cpp` - 包含所有 stub 函数的实现
-
-### 使用示例
-
-```bash
-# 使用宏式打桩器
-python gen_ut.py --compdb compile_commands.json --src src/myfile.c \
-    --construct --stub-framework macro
-
-# 针对特定函数
-python gen_ut.py --compdb compile_commands.json --src src/myfile.c \
-    --funcs "function_using_external_calls" --construct --stub-framework macro
-```
-
-### 限制
-
-- 仅支持直接函数调用，不支持函数指针调用
-- 无法处理通过宏展开的函数调用
-- 输出参数的约束求解有限（仅支持指针类型）
-
-## 工作原理
-
-### 1. 编译数据库解析
-
-- 读取 `compile_commands.json` 提取编译参数
-- 自动检测编译器（gcc/clang）或使用显式配置
-- 从检测到的编译器添加系统包含路径
-
-### 2. 源代码分析
-
-- 使用 libclang 将 C 源文件解析为 AST
-- 提取带参数类型的函数声明
-- 计算每个函数的圈复杂度
-- 识别全局变量依赖
-
-### 3. 约束提取
-
-- 遍历函数 AST 查找 if/switch 语句
-- 提取分支条件和参数约束
-- 为每个可能的执行路径生成路径约束
-- 处理嵌套条件和逻辑运算符
-- **打桩约束提取**：检测函数调用，提取返回值约束和输出参数约束，生成 stub 函数
-
-### 4. 测试生成
-
-- 创建包含 `extern "C"` 函数声明的头文件
-- 为每个路径约束生成 GTest 测试用例
-- 使用配置进行命名约定和默认值设置
-- 可选地从分支条件构造测试参数
-- **打桩集成**：生成 stub 函数声明和实现，在测试用例中自动插入 `INSTALL_STUB` / `UNINSTALL_STUB` 宏
-
-### 输出文件
-
-使用默认配置：
-
-- `ut_<模块>.h` - 包含 `extern "C"` 函数声明的头文件
-- `ut_<模块>.cpp` - GTest 测试用例
-- `ut_<模块>_stub.cpp` - 打桩函数实现（当使用 `--stub-framework` 时生成）
-
-使用自定义配置（`file_prefix: "test_"`，`suite_suffix: "UT"`）：
-
-- `test_<模块>.h` - 包含 `extern "C"` 函数声明的头文件
-- `test_<模块>.cpp` - GTest 测试用例，使用 `MathUtilsUT` 测试套件类
-- `test_<模块>_stub.cpp` - 打桩函数实现（当使用 `--stub-framework` 时生成）
-
-## 测试项目
-
-`test_c_project/` 目录包含一个用于测试生成器的示例 C 项目。
-
-### 构建测试项目
-
-**Windows (PowerShell):**
-
-```bash
-cd test_c_project
-.\build.ps1          # 构建
-.\build.ps1 clean   # 清理
-```
-
-**Unix/Git Bash:**
-
-```bash
-cd test_c_project
-./build.sh          # 构建
-./build.sh clean    # 清理
-```
-
-构建输出：
-
-- 二进制文件：`build/test_c_project.exe`
-- 编译数据库：`compile_commands.json`（libclang 使用）
-
-测试项目包含多个测试模块，用于验证生成器的不同功能：
-
-- `math_utils.c` - 基础功能测试（算术运算、条件分支）
-- `global_ptr_test.c` - 全局指针变量测试（指针 NULL 检查、字段条件等）
-- `stub_test.c` - 打桩功能测试（函数返回值、输出参数、嵌套调用等）
-
-### 为测试项目生成测试
-
-```bash
-# 默认配置
-python gen_ut.py --compdb test_c_project/compile_commands.json --src test_c_project/src/math_utils.c --outdir test_c_project/test
-
-# 自定义配置
-python gen_ut.py --config utgen.json --compdb test_c_project/compile_commands.json --src test_c_project/src/math_utils.c  --outdir test_c_project/test
-
-# 使用参数构造
-python gen_ut.py --compdb test_c_project/compile_commands.json --src test_c_project/src/math_utils.c  --outdir test_c_project/test --construct
-
-# 使用宏式打桩器（针对 stub_test.c）
-python gen_ut.py --compdb test_c_project/compile_commands.json --src test_c_project/src/stub_test.c --outdir test_c_project/test --construct --stub-framework macro
-```
-
-## 扩展和定制
-
-### 添加自定义类型默认值
-
-在配置中添加项目特定类型：
-
-```json
-{
-    "default_values": {
-        "custom_type_defaults": {
-            "MyString": "\"\"",
-            "Handle": "NULL",
-            "Status": "STATUS_OK",
-            "Buffer": "{0}",
-            "Config": "DEFAULT_CONFIG"
-        }
+  "naming": {
+    "file_prefix": "ut_",
+    "suite_suffix": "Test",
+    "test_name_pattern": "{func}_Path{index}"
+  },
+  "default_values": {
+    "int_default": "0",
+    "pointer_default": "NULL",
+    "custom_type_defaults": {
+      "Handle": "INVALID_HANDLE_VALUE"
     }
+  },
+  "compiler": "auto",
+  "extra_includes": [
+    "<test_helpers.h>",
+    "\"project_test_macros.h\""
+  ]
 }
 ```
 
-### 自定义命名模式
+## Stub 机制（可选）
 
-调整命名模式以匹配项目约定：
+启用 `--stub-framework macro` 时，会额外分析被测函数中的外部调用，并生成对应 stub 代码。
 
-```json
-{
-    "naming": {
-        "file_prefix": "test_",
-        "file_suffix": "_gtest",
-        "suite_suffix": "Fixture",
-        "test_name_pattern": "Test_{func}_Scenario{index}"
-    }
-}
+典型输出：
+
+- `ut_<module>.h`
+- `ut_<module>.cpp`
+- `ut_<module>_stub.cpp`（仅启用 stub 时）
+
+当前限制：
+
+- 仅支持直接函数调用（不支持函数指针调用）
+- 宏展开后的复杂调用识别有限
+
+## 示例项目
+
+仓库内置 `test_c_project/` 用于验证生成器行为。
+
+当前示例源文件：
+
+- `basic_functions.c`
+- `control_flow.c`
+- `error_handling.c`
+- `memory_management.c`
+- `nested_struct_test.c`
+- `param_combo.c`
+- `stub_dependency.c`
+
+构建：
+
+```bash
+# Windows PowerShell
+cd test_c_project
+.\build.ps1
+
+# 或 Unix/Git Bash
+./build.sh
 ```
 
-### 扩展基本类型识别
+基于示例生成测试：
 
-添加项目特定类型关键字：
-
-```json
-{
-    "basic_type_keywords": [
-        "int", "char", "float", "double", "long", "short",
-        "bool", "size_t", "unsigned", "signed",
-        "uint8_t", "uint16_t", "uint32_t", "uint64_t",
-        "int8_t", "int16_t", "int32_t", "int64_t",
-        "time_t", "ssize_t", "pid_t", "mode_t"
-    ]
-}
+```bash
+python gen_ut.py --compdb test_c_project/compile_commands.json --src test_c_project/src/control_flow.c --outdir test_c_project/test
 ```
 
 ## 限制
 
-1. **仅支持 C 语言**：当前仅支持 C 源文件（不支持 C++）
-2. **简单约束求解**：约束提取处理基本比较但不支持复杂表达式
-3. **局部变量引用**：无法自动解析返回表达式中的局部变量引用
-4. **函数指针**：对函数指针类型的支持有限
-5. **复杂宏**：预处理器宏在解析期间展开，可能影响分支检测
-6. **打桩函数识别**：仅支持直接函数调用，不支持函数指针调用或通过宏展开的调用
+1. 当前仅支持 C 源文件（不支持 C++ 源）
+2. 约束求解以常见比较表达式为主，复杂表达式支持有限
+3. 复杂宏可能影响分支识别准确性
 
 ## 故障排除
 
-### 常见问题
-
-**"libclang not found" 错误：**
-
-```bash
-# 设置 libclang 库路径
-export LIBCLANG_PATH="/path/to/libclang.so"
-# 或在 Windows 上
-set LIBCLANG_PATH=C:\path\to\libclang.dll
-```
-
-**缺少编译数据库：**
-
-- 确保你的构建系统生成 `compile_commands.json`
-- 对于 CMake：`cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ..`
-- 对于 Make 项目：使用 Bear（`bear -- make`）
-
-**包含路径不正确：**
-
-- 使用 `--project-root` 指定项目根目录
-- 检查 `compile_commands.json` 是否包含正确路径
-
-## 贡献
-
-1. Fork 仓库
-2. 创建特性分支
-3. 进行更改并添加适当的测试
-4. 提交 Pull Request
-
-### 开发环境设置
-
-```bash
-git clone <仓库地址>
-cd genut
-pip install -r requirements.txt  # 如果存在 requirements.txt 文件
-```
-
-### 运行测试
-
-```bash
-# 运行集成测试
-python -m pytest test/  # 如果存在 test 目录
-
-# 使用示例项目测试
-cd test_c_project
-./build.sh
-cd ..
-python gen_ut.py --compdb test_c_project/compile_commands.json --src test_c_project/src/math_utils.c
-```
+- **`libclang not found`**：设置 `LIBCLANG_PATH`
+- **找不到编译参数**：确认 `compile_commands.json` 存在且路径正确
+- **头文件解析异常**：尝试补充 `--project-root`
 
 ## 许可证
 
-[MIT 许可证](LICENSE)
-
-## 致谢
-
-- 基于 [libclang](https://clang.llvm.org/docs/Tooling.html) 进行 C/C++ 解析
-- 为 [Google Test](https://github.com/google/googletest) 框架生成测试
-- 受各种单元测试生成工具和研究的启发
+[MIT](LICENSE)
