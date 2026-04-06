@@ -93,20 +93,13 @@ class CSourceAnalyzer:
         return funcs_info, ordered_includes, self.known_constants
 
     def _calculate_complexity(self, node):
-        """Calculate cyclomatic complexity of a function."""
+        """Calculate complexity based on constructs the path extractor handles: if/else chains and switch cases."""
         complexity = 1
         branch_kinds = {
-            clang.CursorKind.IF_STMT, clang.CursorKind.FOR_STMT,
-            clang.CursorKind.WHILE_STMT, clang.CursorKind.DO_STMT,
+            clang.CursorKind.IF_STMT,
             clang.CursorKind.CASE_STMT, clang.CursorKind.DEFAULT_STMT,
-            clang.CursorKind.CONDITIONAL_OPERATOR, clang.CursorKind.BINARY_OPERATOR
         }
-
         for child in node.walk_preorder():
             if child.kind in branch_kinds:
-                if child.kind == clang.CursorKind.BINARY_OPERATOR:
-                    if child.spelling in ('&&', '||'):
-                        complexity += 1
-                else:
-                    complexity += 1
+                complexity += 1
         return complexity

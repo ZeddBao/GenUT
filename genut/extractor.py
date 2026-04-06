@@ -1,5 +1,6 @@
 """Constraint extractor from function AST."""
 
+import copy
 import re
 import clang.cindex as clang
 
@@ -32,6 +33,10 @@ class ConstraintExtractor:
         self._find_call_modified_vars()
         self._find_func_ptr_vars()
         self._find_func_ptr_params()
+        # Local const variables with compile-time integer values (e.g. const int MIN = 0)
+        # Used by _solve() to convert symbolic names to concrete integers.
+        self.const_locals = {}
+        self._find_const_locals()
 
 
     def _find_global_vars(self):
@@ -41,6 +46,9 @@ class ConstraintExtractor:
                 if ref and ref.kind == clang.CursorKind.VAR_DECL:
                     parent = ref.semantic_parent
                     if parent and parent.kind in (clang.CursorKind.TRANSLATION_UNIT, clang.CursorKind.NAMESPACE):
+                        # Skip static globals (internal linkage) — tests can't access them via extern
+                        if ref.storage_class == clang.StorageClass.STATIC:
+                            continue
                         self.global_vars[node.spelling] = {
                             'type': ref.type.spelling,
                             'canonical_type': ref.type.get_canonical().spelling
@@ -232,6 +240,60 @@ class ConstraintExtractor:
                     }
                     self.trackable_vars.add(node.spelling)
 
+    def _find_const_locals(self):
+        """Find local const variables with compile-time integer values.
+
+        Scans the function body for declarations like:
+            const int MIN_VALID = 0;
+            const int MAX_VALID = 100;
+        and stores them in self.const_locals so _solve() can convert symbolic
+        names to concrete numeric values in generated test parameters.
+        """
+        for node in self.func_node.walk_preorder():
+            if node.kind != clang.CursorKind.VAR_DECL:
+                continue
+            # Skip parameters and globals — only local consts
+            if node.spelling in self.param_names or node.spelling in self.global_vars:
+                continue
+            # Must be const-qualified integer type
+            if not node.type.is_const_qualified():
+                continue
+            canonical = node.type.get_canonical()
+            if canonical.kind not in (
+                clang.TypeKind.INT, clang.TypeKind.UINT,
+                clang.TypeKind.LONG, clang.TypeKind.ULONG,
+                clang.TypeKind.LONGLONG, clang.TypeKind.ULONGLONG,
+                clang.TypeKind.SHORT, clang.TypeKind.USHORT,
+                clang.TypeKind.SCHAR, clang.TypeKind.UCHAR,
+            ):
+                continue
+            # Find the initializer — must be a compile-time integer literal
+            for child in node.get_children():
+                if child.kind == clang.CursorKind.INTEGER_LITERAL:
+                    toks = [t.spelling for t in child.get_tokens()]
+                    if toks:
+                        try:
+                            val = int(toks[0], 0)
+                            self.const_locals[node.spelling] = val
+                        except (ValueError, TypeError):
+                            pass
+                    break
+                # Handle UNARY_OPERATOR for negative literals like -10
+                if child.kind == clang.CursorKind.UNARY_OPERATOR:
+                    op_toks = [t.spelling for t in child.get_tokens()]
+                    if op_toks and op_toks[0] == '-':
+                        for grandchild in child.get_children():
+                            if grandchild.kind == clang.CursorKind.INTEGER_LITERAL:
+                                gtoks = [t.spelling for t in grandchild.get_tokens()]
+                                if gtoks:
+                                    try:
+                                        val = -int(gtoks[0], 0)
+                                        self.const_locals[node.spelling] = val
+                                    except (ValueError, TypeError):
+                                        pass
+                                break
+                    break
+
     def _find_call_expr(self, node):
         """Recursively find the first CALL_EXPR child of a node."""
         for child in node.get_children():
@@ -375,16 +437,29 @@ class ConstraintExtractor:
         body = next((c for c in self.func_node.get_children() if c.kind == clang.CursorKind.COMPOUND_STMT), None)
         if body:
             self._visit(body, {}, paths, {})
-        return paths or [PathConstraint()]
+        if not paths:
+            # No branches: single straight-line path. Capture any return statement.
+            ret_val = self._get_return_value(body) if body else None
+            paths.append(PathConstraint(expected_return=ret_val))
+        return paths
 
     def _visit(self, node, ctx, paths, stub_ctx):
+        # When called directly on a control-flow statement, dispatch immediately
+        # (happens when the implicit-else handler passes a sibling IF/SWITCH node)
+        if node.kind == clang.CursorKind.IF_STMT:
+            self._handle_if(node, ctx, paths, stub_ctx)
+            return
+        if node.kind == clang.CursorKind.SWITCH_STMT:
+            self._handle_switch(node, ctx, paths, stub_ctx)
+            return
+
         children = list(node.get_children())
         i = 0
         while i < len(children):
             child = children[i]
             k = child.kind
             if k == clang.CursorKind.SWITCH_STMT:
-                self._handle_switch(child, ctx, paths, stub_ctx)
+                self._handle_switch(child, ctx, paths, stub_ctx, parent_body=node)
                 i += 1
             elif k == clang.CursorKind.IF_STMT:
                 # 处理if语句，获取否定上下文
@@ -405,6 +480,17 @@ class ConstraintExtractor:
                         # 处理后续兄弟节点，使用否定上下文
                         for sibling in remaining_children:
                             self._visit(sibling, neg_ctx, implicit_paths, neg_stub)
+                        # If any "else (implicit)" paths have no return value, look for a
+                        # trailing RETURN_STMT in the siblings (the fallthrough case).
+                        trailing_ret = None
+                        for sibling in reversed(remaining_children):
+                            if sibling.kind == clang.CursorKind.RETURN_STMT:
+                                trailing_ret = self._get_return_value(sibling)
+                                break
+                        if trailing_ret is not None:
+                            for p in implicit_paths:
+                                if p.description == "else (implicit)" and p.expected_return is None:
+                                    p.expected_return = trailing_ret
                         # 将隐式路径合并到主路径中
                         if implicit_paths:
                             # 找到并更新隐式else路径
@@ -419,18 +505,122 @@ class ConstraintExtractor:
                         else:
                             # 没有生成路径，保留隐式else路径
                             pass
-                    # 跳过已处理的兄弟节点
-                    # 不break，继续处理下一个兄弟节点
+                    # Skip the remaining siblings already processed in the implicit-else context
+                    i += len(remaining_children)
                 i += 1
             else:
                 self._visit(child, ctx, paths, stub_ctx)
                 i += 1
 
-    def _handle_switch(self, switch_node, ctx, paths, stub_ctx):
+    def _get_case_int_value(self, case_value_node):
+        """Get the integer value of a switch case expression, including enum constants."""
+        if case_value_node.kind == clang.CursorKind.INTEGER_LITERAL:
+            toks = list(case_value_node.get_tokens())
+            if toks:
+                try:
+                    return int(toks[0].spelling, 0)
+                except (ValueError, TypeError):
+                    pass
+        if case_value_node.kind == clang.CursorKind.DECL_REF_EXPR:
+            ref = case_value_node.referenced
+            if ref and ref.kind == clang.CursorKind.ENUM_CONSTANT_DECL:
+                try:
+                    return ref.enum_value
+                except Exception:
+                    pass
+        if case_value_node.kind == clang.CursorKind.CHARACTER_LITERAL:
+            toks = list(case_value_node.get_tokens())
+            if toks and len(toks[0].spelling) == 3:
+                return ord(toks[0].spelling[1])
+        return None
+
+    def _get_switch_case_return_value(self, switch_body, case_node):
+        """Get return value for a switch case, including sibling statements after the CASE_STMT.
+
+        In C, statements after a case label (until the next case/default) are siblings
+        of the CASE_STMT in the switch body, not children. This method searches those siblings.
+        """
+        ret_val = self._get_return_value(case_node)
+        if ret_val is not None:
+            return ret_val
+        if switch_body is None:
+            return None
+        case_end = case_node.extent.end.offset
+        for sibling in switch_body.get_children():
+            sib_start = sibling.extent.start.offset
+            if sib_start <= case_end:
+                continue
+            # Stop at next case or default
+            if sibling.kind in (clang.CursorKind.CASE_STMT, clang.CursorKind.DEFAULT_STMT):
+                break
+            if sibling.kind == clang.CursorKind.RETURN_STMT:
+                toks = [t.spelling for t in sibling.get_tokens()]
+                expr_toks = [t for t in toks if t not in ('return', ';')]
+                if expr_toks:
+                    expr = ' '.join(expr_toks)
+                    expr = re.sub(r'-\s+(\d)', r'-\1', expr)
+                    return expr
+            # Recurse into compound statements
+            inner = self._get_return_value(sibling)
+            if inner is not None:
+                return inner
+        return None
+
+    def _get_case_var_assignment(self, switch_body, case_node, var_name):
+        """Find the value assigned to var_name within a case block.
+
+        Searches the case_node subtree and its siblings (until next case/default).
+        Returns the assigned value string or None.
+        """
+        if case_node is None:
+            return None
+
+        nodes_to_check = list(case_node.walk_preorder())
+
+        # Also check sibling statements in switch_body after this case
+        if switch_body is not None:
+            case_end = case_node.extent.end.offset
+            for sibling in switch_body.get_children():
+                if sibling.extent.start.offset <= case_end:
+                    continue
+                if sibling.kind in (clang.CursorKind.CASE_STMT, clang.CursorKind.DEFAULT_STMT):
+                    break
+                nodes_to_check.extend(sibling.walk_preorder())
+
+        for node in nodes_to_check:
+            if node.kind != clang.CursorKind.BINARY_OPERATOR:
+                continue
+            children = list(node.get_children())
+            if len(children) != 2:
+                continue
+            left, right = children
+            if left.kind != clang.CursorKind.DECL_REF_EXPR or left.spelling != var_name:
+                continue
+            # Verify the operator is plain '=' (not '==', '+=', etc.)
+            left_end = left.extent.end.offset
+            right_start = right.extent.start.offset
+            op_tok = None
+            for tok in node.get_tokens():
+                ts = tok.extent.start.offset
+                if left_end <= ts < right_start:
+                    op_tok = tok.spelling
+                    break
+            if op_tok != '=':
+                continue
+            # Return the right-hand side as a string
+            toks = [t.spelling for t in right.get_tokens()]
+            val = ' '.join(toks).strip()
+            val = re.sub(r'-\s+(\d)', r'-\1', val)
+            return val
+
+        return None
+
+    def _handle_switch(self, switch_node, ctx, paths, stub_ctx, parent_body=None):
         children = list(switch_node.get_children())
         if not children:
             return
         switch_param = self._get_param_ref(children[0])
+        switch_body = children[1] if len(children) > 1 else None
         seen, has_default = [], False
         for n in switch_node.walk_preorder():
             if n.kind == clang.CursorKind.CASE_STMT:
@@ -446,12 +636,66 @@ class ConstraintExtractor:
             if switch_param:
                 c[switch_param] = val
             desc = f"{switch_param} == {val}" if switch_param else f"case {val}"
-            ret_val = self._get_return_value(case_node)
+            ret_val = self._get_switch_case_return_value(switch_body, case_node)
             paths.append(PathConstraint(c, desc, expected_return=ret_val,
                                         stub_constraints=self._build_stub_constraints(stub_ctx)))
         if has_default:
-            paths.append(PathConstraint(dict(ctx), "default",
+            default_ctx = dict(ctx)
+            default_case_node = None
+            if switch_param:
+                # Try to generate a value not covered by any case (handles enums and chars too)
+                int_vals = []
+                for val_str, case_node_iter in seen:
+                    try:
+                        int_vals.append(int(val_str, 0))
+                        continue
+                    except (ValueError, TypeError):
+                        pass
+                    # Try resolving enum constant / char literal numeric value via AST
+                    case_ch = list(case_node_iter.get_children())
+                    if case_ch:
+                        n = self._get_case_int_value(case_ch[0])
+                        if n is not None:
+                            int_vals.append(n)
+                if int_vals:
+                    default_ctx[switch_param] = str(max(int_vals) + 1)
+            # Find the DEFAULT_STMT node for return value extraction
+            for n in switch_node.walk_preorder():
+                if n.kind == clang.CursorKind.DEFAULT_STMT:
+                    default_case_node = n
+                    break
+            default_ret = self._get_switch_case_return_value(switch_body, default_case_node) if default_case_node else None
+            paths.append(PathConstraint(default_ctx, "default", expected_return=default_ret,
                                         stub_constraints=self._build_stub_constraints(stub_ctx)))
+
+        # Post-process: resolve case paths whose expected_return is still None.
+        # Handles the common pattern: case N: var = value; break; ... return var;
+        if parent_body is not None:
+            switch_end = switch_node.extent.end.offset
+            trailing_return_var = None
+            for sib in parent_body.get_children():
+                if sib.extent.start.offset > switch_end:
+                    if sib.kind == clang.CursorKind.RETURN_STMT:
+                        ret_toks = [t.spelling for t in sib.get_tokens()
+                                    if t.spelling not in ('return', ';')]
+                        if len(ret_toks) == 1 and re.match(r'^[a-zA-Z_]\w*$', ret_toks[0]):
+                            trailing_return_var = ret_toks[0]
+                    break
+
+            if trailing_return_var:
+                n_paths = len(seen) + (1 if has_default else 0)
+                new_paths = paths[-n_paths:] if n_paths else []
+                for i, (_, case_node_i) in enumerate(seen):
+                    if i < len(new_paths) and new_paths[i].expected_return is None:
+                        val_str = self._get_case_var_assignment(
+                            switch_body, case_node_i, trailing_return_var)
+                        if val_str is not None:
+                            new_paths[i].expected_return = val_str
+                if has_default and new_paths and new_paths[-1].expected_return is None:
+                    val_str = self._get_case_var_assignment(
+                        switch_body, default_case_node, trailing_return_var)
+                    if val_str is not None:
+                        new_paths[-1].expected_return = val_str
 
     def _handle_if(self, if_node, ctx, paths, stub_ctx):
         chain = []
@@ -615,24 +859,31 @@ class ConstraintExtractor:
         # print(f"[DEBUG] _extract_field_access_from_ast called for param: {param_name}, node kind: {cond_node.kind.name}")
         # Check if this is a binary operator (comparison)
         if cond_node.kind != clang.CursorKind.BINARY_OPERATOR:
-            # print(f"[DEBUG]   Not a BINARY_OPERATOR, returning None")
             return None
 
-        # Get operator token
-        op_token = None
-        for token in cond_node.get_tokens():
-            if token.spelling in ('>', '>=', '<', '<=', '==', '!='):
-                op_token = token.spelling
-                break
-        if not op_token:
-            return None
-
-        # Get left and right children
+        # Get left and right children first so we can locate the top-level operator
         children = list(cond_node.get_children())
         if len(children) != 2:
             return None
-
         left, right = children
+
+        # Find the top-level operator by scanning only tokens that lie between
+        # the end of the left child and the start of the right child.
+        # This avoids picking up operators inside sub-expressions (e.g. the '=='
+        # inside 'math_op == NULL' when the whole condition is 'math_op == NULL || ...').
+        left_end = left.extent.end.offset
+        right_start = right.extent.start.offset
+        op_token = None
+        for token in cond_node.get_tokens():
+            tok_start = token.extent.start.offset
+            if left_end <= tok_start < right_start:
+                if token.spelling in ('||', '&&'):
+                    return None  # Logical operator — not a direct field comparison
+                if token.spelling in ('>', '>=', '<', '<=', '==', '!='):
+                    op_token = token.spelling
+                    break
+        if not op_token:
+            return None
         # print(f"[DEBUG] _extract_field_access_from_ast left kind: {left.kind.name}, spelling: {left.spelling}")
         # print(f"[DEBUG] _extract_field_access_from_ast right kind: {right.kind.name}, spelling: {right.spelling}")
 
@@ -805,10 +1056,27 @@ class ConstraintExtractor:
         """Apply a branch condition, returning (new_ctx, new_stub_ctx)."""
         # Debug: print node kind
         # print(f"[DEBUG] _apply_condition node kind: {cond_node.kind}, name: {cond_node.kind.name}")
+
+        # Unwrap PAREN_EXPR (e.g., if ((cond)))
+        while cond_node.kind == clang.CursorKind.PAREN_EXPR:
+            ch = list(cond_node.get_children())
+            if len(ch) == 1:
+                cond_node = ch[0]
+            else:
+                break
+
+        # Handle logical NOT wrapping: !(inner) → flip negate and recurse into inner expression
+        if cond_node.kind == clang.CursorKind.UNARY_OPERATOR:
+            toks_list = [t.spelling for t in cond_node.get_tokens()]
+            if toks_list and toks_list[0] == '!':
+                ch = list(cond_node.get_children())
+                if len(ch) == 1:
+                    return self._apply_condition(ch[0], ctx, stub_ctx, not negate)
+
         token_str = ' '.join(t.spelling for t in cond_node.get_tokens())
         new_ctx = dict(ctx)
         new_stub = dict(stub_ctx)
-        _LIT = r'(-\s*\d+|[A-Za-z0-9_]+)'
+        _LIT = r"(-?\s*\d+(?:\s*[+\-*/]\s*\d+)*|'[^']+'|[A-Za-z0-9_]+)"
         all_vars = self.trackable_vars | set(self.call_var_map.keys()) | set(self.call_modified_var_map.keys())
 
         # Skip variables that are local call results (return values or output params)
@@ -899,8 +1167,9 @@ class ConstraintExtractor:
                     hint = get_nested_value(struct_val, field_ops)
                     solved_value = self._solve(op, lit, negate, hint)
 
-                    # Create a copy to avoid modifying existing dict in ctx
-                    struct_val = dict(struct_val) if isinstance(struct_val, dict) else {}
+                    # Deep copy to avoid mutating shared nested dicts when the loop
+                    # later applies the negation context for the else path.
+                    struct_val = copy.deepcopy(struct_val) if isinstance(struct_val, dict) else {}
                     set_nested_value_with_ptr(struct_val, field_ops, solved_value, field_types)
                     new_ctx[param] = struct_val
                     continue  # Move to next parameter
@@ -922,8 +1191,9 @@ class ConstraintExtractor:
                     hint = get_nested_value(struct_val, field_ops)
                     solved_value = self._solve(op, lit, negate, hint)
 
-                    # Create a copy to avoid modifying existing dict in ctx
-                    struct_val = dict(struct_val) if isinstance(struct_val, dict) else {}
+                    # Deep copy to avoid mutating shared nested dicts when the loop
+                    # later applies the negation context for the else path.
+                    struct_val = copy.deepcopy(struct_val) if isinstance(struct_val, dict) else {}
                     set_nested_value_with_ptr(struct_val, field_ops, solved_value, None)
                     new_ctx[param] = struct_val
                     continue  # Move to next parameter
@@ -946,29 +1216,80 @@ class ConstraintExtractor:
             if matched:
                 continue
 
-            # No field access, treat as scalar parameter
+            # No field access, treat as scalar parameter.
+            # Use re.finditer to process ALL comparison sub-conditions for this param
+            # (handles compound conditions like 'age >= 0 && age <= 12' or 'a < L || a > U'):
+            # for each match, update the hint and keep the LAST solved value.  This correctly
+            # derives values for the else paths of range-based if-else chains.
             hint = existing if not isinstance(existing, dict) else None
-            m = re.search(rf'\b{re.escape(param)}\s*(>|>=|<|<=|==|!=)\s*{_LIT}', token_str)
-            if m and m.group(2) not in self.trackable_vars:
-                new_ctx[param] = self._solve(m.group(1), m.group(2), negate, hint)
+            last_solved = None
+            for m in re.finditer(rf'\b{re.escape(param)}\s*(>|>=|<|<=|==|!=)\s*{_LIT}', token_str):
+                if m.group(2) in self.trackable_vars:
+                    continue
+                # Reject match when param is the right operand of subtraction or division:
+                # those operators flip/change the comparison direction, producing wrong constraints.
+                # e.g., avoid extracting 'b' from 'a - b < 0' (would give b<0, but a-b<0 means a<b)
+                # or 'b' from 'a / b > 10' (would give b>10, but that's the wrong variable)
+                # Note: '+' and '*' are NOT blocked — extracting b from 'a+b>100' or 'a*b==0' is valid.
+                pre = token_str[:m.start()].rstrip()
+                if pre and pre[-1] in ('-', '/'):
+                    continue
+                solved = self._solve(m.group(1), m.group(2), negate, hint)
+                hint = solved  # carry forward as hint for the next sub-condition
+                last_solved = solved
+            if last_solved is not None:
+                new_ctx[param] = last_solved
                 continue
-            m = re.search(rf'{_LIT}\s*(>|>=|<|<=|==|!=)\s*\b{re.escape(param)}\b', token_str)
-            if m and m.group(1) not in self.trackable_vars:
+            # Try reverse pattern: literal OP param
+            hint = existing if not isinstance(existing, dict) else None
+            last_solved = None
+            for m in re.finditer(rf'{_LIT}\s*(>|>=|<|<=|==|!=)\s*\b{re.escape(param)}\b', token_str):
+                if m.group(1) in self.trackable_vars:
+                    continue
                 prefix = token_str[:m.start(1)].rstrip()
-                if not (prefix.endswith('.') or prefix.endswith('->')):
-                    rev = self._OP_REVERSE.get(m.group(2), m.group(2))
-                    new_ctx[param] = self._solve(rev, m.group(1), negate, hint)
+                if prefix.endswith('.') or prefix.endswith('->'):
+                    continue
+                rev = self._OP_REVERSE.get(m.group(2), m.group(2))
+                solved = self._solve(rev, m.group(1), negate, hint)
+                hint = solved
+                last_solved = solved
+            if last_solved is not None:
+                new_ctx[param] = last_solved
+                continue
+            # Fallback: bare boolean truthy condition if (param) or if (!param)
+            # Only apply when no comparison operator appears adjacent to the param,
+            # param is not used as an array base (e.g., param[i]),
+            # and param is not used in an arithmetic expression (e.g., INT_MIN - param)
+            if (re.search(rf'\b{re.escape(param)}\b', token_str)
+                    and not re.search(
+                        rf'(\b{re.escape(param)}\s*(?:>|>=|<|<=|==|!=)'
+                        rf'|(?:>|>=|<|<=|==|!=)\s*\b{re.escape(param)}\b)',
+                        token_str)
+                    and not re.search(rf'\b{re.escape(param)}\s*\[', token_str)
+                    and not re.search(rf'[+\-*/]\s*\b{re.escape(param)}\b', token_str)
+                    and not re.search(rf'\b{re.escape(param)}\s*[+\-*/]', token_str)):
+                if re.search(rf'!\s*\(?\s*{re.escape(param)}\b', token_str):
+                    # Condition is !param (param is zero/falsy):
+                    #   negate=False → we're in the branch where !param is true → param=0
+                    #   negate=True  → we're NOT in this branch → param≠0
+                    new_ctx[param] = self._solve('==', '0', negate, hint)
+                else:
+                    new_ctx[param] = self._solve('!=', '0', negate, hint)
 
         # Handle call-result local variables -> stub constraints
+        # local_results: call-return / out-param locals whose values we cannot determine from
+        # outside, so they must be excluded as comparison literals.  Function *parameters* are
+        # allowed through — _solve treats them as 0 (their default in generated tests).
+        local_results = set(self.call_var_map.keys()) | set(self.call_modified_var_map.keys())
         for var_name in self.call_var_map:
             existing = new_stub.get(var_name)
             hint = existing if not isinstance(existing, dict) else None
             m = re.search(rf'\b{re.escape(var_name)}\s*(>|>=|<|<=|==|!=)\s*{_LIT}', token_str)
-            if m and m.group(2) not in all_vars:
+            if m and m.group(2) not in local_results:
                 new_stub[var_name] = self._solve(m.group(1), m.group(2), negate, hint)
                 continue
             m = re.search(rf'{_LIT}\s*(>|>=|<|<=|==|!=)\s*\b{re.escape(var_name)}\b', token_str)
-            if m and m.group(1) not in all_vars:
+            if m and m.group(1) not in local_results:
                 prefix = token_str[:m.start(1)].rstrip()
                 if not (prefix.endswith('.') or prefix.endswith('->')):
                     rev = self._OP_REVERSE.get(m.group(2), m.group(2))
@@ -993,29 +1314,96 @@ class ConstraintExtractor:
         return new_ctx, new_stub
 
     def _solve(self, op, literal, negate, hint=None):
+        literal_stripped = literal.replace(' ', '')
+        n = None
+
+        # 1. Try integer parsing
         try:
-            n = int(literal.replace(' ', ''), 0)
+            n = int(literal_stripped, 0)
         except (ValueError, TypeError):
-            # For non-numeric literals like NULL
-            # Generate valid C++ expressions instead of comments
-            if literal == "NULL":
+            pass
+
+        # 2. Try safe arithmetic expression evaluation (e.g., 1024*1024)
+        if n is None and re.match(r'^-?\d+(?:[+\-*/]-?\d+)*$', literal_stripped):
+            try:
+                n = int(eval(literal_stripped))  # noqa: S307 — regex-guarded, digits+ops only
+            except Exception:
+                pass
+
+        # 2b. If the literal is a trackable parameter variable, treat its default value as 0.
+        # This enables stub value resolution when branch conditions compare a stub return value
+        # against a function parameter (e.g., `a <= limit_a`).  The generated tests initialise
+        # every parameter to 0, so 0 is the correct numeric stand-in.
+        if n is None and literal_stripped in self.trackable_vars:
+            n = 0
+
+        # 2c. If the literal is a local const variable with a known integer value
+        # (e.g., `const int MIN_VALID = 0`), resolve it to its compile-time value so
+        # that generated parameter values are concrete integers, not unresolvable symbols.
+        if n is None and literal_stripped in self.const_locals:
+            n = self.const_locals[literal_stripped]
+
+        # 3. Try float parsing (strip f/F/l/L suffix, e.g., 0.0f, 1.5f)
+        if n is None:
+            try:
+                float_stripped = re.sub(r'[fFlL]$', '', literal_stripped)
+                nf = float(float_stripped)
+                if not negate:
+                    table_f = {'>': nf+1, '>=': nf, '<': nf-1, '<=': nf, '==': nf, '!=': nf+1}
+                else:
+                    table_f = {'>': nf, '>=': nf-1, '<': nf, '<=': nf+1, '==': nf+1, '!=': nf}
+                result_f = table_f.get(op, nf)
+                if result_f == int(result_f):
+                    return str(int(result_f))
+                return str(result_f)
+            except (ValueError, TypeError):
+                pass
+
+        # 4. Non-numeric literal (NULL, identifiers, char literals like 'A')
+        if n is None:
+            lit = literal.strip()
+            if lit == "NULL":
                 if op == '!=':
-                    # var != NULL is true when negate=False, false when negate=True
                     return "(void*)1" if not negate else "NULL"
                 else:
-                    # var == NULL or other comparisons
                     return "NULL" if not negate else "(void*)1"
+            # Char literals: 'A', '\n', etc. — try to offset the value for negation
+            elif re.match(r"^'[^']*'$", lit):
+                if not negate:
+                    return lit  # use the literal as-is for positive condition
+                else:
+                    # For negated char literal, derive a value that is definitely different
+                    # by taking the ASCII value and returning char+1 (or 0 if unparseable)
+                    inner = lit[1:-1]
+                    if len(inner) == 1:
+                        offset_val = (ord(inner) + 1) % 128
+                        # Return as integer (e.g., 66 for 'B' instead of 'A')
+                        return str(offset_val)
+                    return "0"
             else:
-                # For other literals (string literals, etc.)
-                # Return the literal itself for positive conditions, placeholder for negative
+                lit_id = literal.strip()
                 if op == '!=':
                     return f"/* not {literal} */" if not negate else literal
+                elif negate and re.match(r'^[A-Z][A-Z0-9_]*$', lit_id):
+                    # Negating an inequality with a macro constant (e.g., not (a > INT_MAX)):
+                    # return 0 as a safe compilable value satisfying the negated condition
+                    return "0"
                 else:
                     return literal if not negate else f"/* not {literal} */"
+
+        # Integer arithmetic
+        # When negating an equality (op == '==') and a hint (previous constraint value) is
+        # available, prefer n+1 to avoid the literal n.  Only fall back to n-1 when n+1 would
+        # collide with the hint, so that consecutive negated equalities (e.g. negating code==0,
+        # then code==1, then code==2 for the final else path) always produce a value outside the
+        # entire set of checked literals rather than cycling back to a value already checked.
         if negate and op == '==' and hint is not None:
             try:
                 h = int(str(hint).replace(' ', ''), 0)
-                return str(n - 1) if h <= n else str(n + 1)
+                candidate = n + 1
+                if candidate == h:
+                    candidate = n - 1
+                return str(candidate)
             except (ValueError, TypeError):
                 pass
         table = {
@@ -1048,7 +1436,7 @@ class ConstraintExtractor:
         return None
 
     def _get_value(self, node):
-        if node.kind == clang.CursorKind.INTEGER_LITERAL:
+        if node.kind in (clang.CursorKind.INTEGER_LITERAL, clang.CursorKind.CHARACTER_LITERAL):
             toks = list(node.get_tokens())
             return toks[0].spelling if toks else None
         if node.kind == clang.CursorKind.DECL_REF_EXPR:

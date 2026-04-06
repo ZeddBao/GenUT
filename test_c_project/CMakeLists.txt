@@ -17,7 +17,7 @@ set(SOURCES
     src/basic_functions.c
     src/control_flow.c
     src/error_handling.c
-    src/func_ptr_test.c
+    src/stub_dependency.c
     src/memory_management.c
     src/nested_struct_test.c
     src/param_combo.c
@@ -28,7 +28,7 @@ set(HEADERS
     include/basic_functions.h
     include/control_flow.h
     include/error_handling.h
-    include/func_ptr_test.h
+    include/stub_dependency.h
     include/memory_management.h
     include/nested_struct_test.h
     include/param_combo.h
@@ -65,12 +65,20 @@ file(GLOB TEST_HEADERS "test/*.h")
 foreach(test_source ${TEST_SOURCES})
   get_filename_component(test_name ${test_source} NAME_WE)
 
-  # Skip stub files
+  # Skip stub files (they are linked into the matching main test target)
   if(${test_name} MATCHES ".*_stub$")
     continue()
   endif()
 
-  add_executable(${test_name} ${test_source} ${TEST_HEADERS})
+  # Include the matching _stub.cpp file if it exists
+  set(stub_source "${CMAKE_SOURCE_DIR}/test/${test_name}_stub.cpp")
+  if(EXISTS ${stub_source})
+    set(test_extra_sources ${stub_source})
+  else()
+    set(test_extra_sources "")
+  endif()
+
+  add_executable(${test_name} ${test_source} ${test_extra_sources} ${TEST_HEADERS})
   target_link_libraries(${test_name} test_c_lib GTest::gtest GTest::gtest_main)
   target_include_directories(${test_name} PRIVATE ${CMAKE_SOURCE_DIR}/include)
 

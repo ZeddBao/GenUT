@@ -167,6 +167,11 @@ class StubBuilder:
                         lines.append("    return NULL;")
                     else:
                         lines.append(f"    return {return_value};")  # keep as-is (might cause compilation error)
+                elif return_value == "(void*)1" and self._is_function_pointer_type(sc.ret_type):
+                    # (void*)1 is a non-NULL placeholder, but calling an invalid function pointer
+                    # causes a crash.  Return nullptr here and let the user replace this with a
+                    # real callable function of the matching type.
+                    lines.append(f"    return nullptr;  // TODO: replace with a real non-NULL stub function of type {sc.ret_type}")
                 else:
                     lines.append(f"    return {return_value};")
             elif sc.ret_type == 'void':

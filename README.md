@@ -170,7 +170,7 @@ python gen_ut.py --compdb compile_commands.json --src src/file.c --construct --s
     "default_values": {
         "int_default": "0",
         "float_default": "0.0",
-        "pointer_default": "nullptr",
+        "pointer_default": "NULL",
         "struct_default": "{}",
         "bool_default": "false",
         "custom_type_defaults": {

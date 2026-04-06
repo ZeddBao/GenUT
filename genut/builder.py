@@ -69,13 +69,7 @@ class GTestBuilder:
         code.append(f"#define {guard}")
         code.append("")
 
-        if self.project_includes:
-            code.append("// --- Original Source Includes (Preserving Order) ---")
-            for inc in self.project_includes:
-                code.append(f"#include {inc}")
-            code.append("")
-
-        # Add user-specified extra includes
+        # Add user-specified extra includes (C++ headers, placed before extern "C")
         if self.config.extra_includes:
             code.append("// --- User-Specified Extra Includes ---")
             for inc in self.config.extra_includes:
@@ -89,6 +83,13 @@ class GTestBuilder:
 
         code.append('extern "C" {')
         code.append("")
+
+        # Place original C source includes inside extern "C" to avoid linkage conflicts
+        if self.project_includes:
+            code.append("// --- Original Source Includes (Preserving Order) ---")
+            for inc in self.project_includes:
+                code.append(f"#include {inc}")
+            code.append("")
 
         if all_globals:
             code.append("// --- External Global Variables ---")
@@ -135,9 +136,9 @@ class GTestBuilder:
     def _is_basic_type(self, canon_type_str):
         """Check if a type is considered a basic type."""
         t = canon_type_str.strip()
-        # Use configurable basic type keywords
+        # Use word-boundary matching to avoid false positives like 'int' inside 'Point'
         basic_keywords = self.config.basic_type_keywords
-        if '*' not in t and any(k in t for k in basic_keywords):
+        if '*' not in t and any(re.search(rf'\b{re.escape(k)}\b', t) for k in basic_keywords):
             return True
         return False
 
@@ -151,6 +152,7 @@ class GTestBuilder:
         """Build the C++ test file."""
         code = self._build_cpp_header()
         for func in self.funcs_info:
+            code.append(f"// Function '{func.name}': cyclomatic complexity = {func.complexity}, test paths generated = {len(func.paths)}")
             for i, path in enumerate(func.paths, 1):
                 code.extend(self._build_test_case(func, path, i))
         return "\n".join(code)
@@ -193,8 +195,9 @@ class GTestBuilder:
                 # Arrays cannot be assigned - generate comment instead
                 code.append(f"    // Note: Global array '{g_name}' cannot be saved/restored automatically")
             else:
-                # Use __typeof__ for all types for simplicity and safety
-                code.append(f"    __typeof__({g_name}) saved_{g_name} = {g_name};")
+                g_type_cpp = self._c_to_cpp_type(g_type)
+                formatted = self._format_param_type(g_type_cpp, f"saved_{g_name}")
+                code.append(f"    {formatted} = {g_name};")
         code.append("")
         return code
 
@@ -220,8 +223,6 @@ class GTestBuilder:
     def _build_test_case(self, func, path, path_index):
         """Build a single test case."""
         code = []
-        code.append(f"// Note: Function '{func.name}' has a cyclomatic complexity of {func.complexity}, {len(func.paths)} test path(s) generated.")
-
         # Use configurable test name pattern
         test_name = self._format_test_name(func.name, path_index)
         desc = f"  // {path.description}" if path.description else ""
@@ -259,7 +260,14 @@ class GTestBuilder:
         if self.construct and func.global_vars:
             code.extend(self._build_global_var_setup(func.global_vars, path.param_values))
 
-        for param in func.params:
+        # Declare scalar/basic params before struct params so array-subscript
+        # references (e.g. items[index]) are already in scope when struct fields are set.
+        def _is_struct_param(p):
+            val = path.param_values.get(p['name'])
+            canon = self._c_to_cpp_type(p['canonical_type'])
+            return isinstance(val, dict) and not self._is_basic_type(canon)
+        ordered_params = sorted(func.params, key=lambda p: (1 if _is_struct_param(p) else 0, func.params.index(p)))
+        for param in ordered_params:
             code.extend(self._build_param_init(param, path.param_values, path_index))
 
         code.extend(self._build_func_call_and_assert(func, path, path_index))
@@ -328,18 +336,25 @@ class GTestBuilder:
                 # (e.g., leaf field with type information)
                 if len(clean_val_dict) == 1 and 'value' in clean_val_dict and not isinstance(clean_val_dict['value'], dict):
                     # This is a scalar value with metadata (type, pointer flag)
-                    scalar_value = clean_val_dict['value']
-                    # Get type information if available from metadata
-                    type_str = fval.get('__type__', "")
-                    # Clean the scalar value (handles comment strings like "/* not NULL */")
-                    cleaned_value = self._clean_scalar_value(scalar_value, type_str)
-                    # Convert Python True/False to C true/false (after cleaning)
-                    if cleaned_value is True:
-                        scalar_str = "true"
-                    elif cleaned_value is False:
-                        scalar_str = "false"
-                    else:
-                        scalar_str = str(cleaned_value)
+                    scalar_str = self._clean_scalar_value(clean_val_dict['value'])
+                    if scalar_str == "(void*)1":
+                        type_str = fval.get('__type__', "")
+                        is_fptr = '(*)' in type_str or ')(*' in type_str
+                        if is_fptr:
+                            code.append(f"{space}// TODO: {field} is a function pointer; assign a valid function to cover the non-NULL path")
+                            scalar_str = "NULL"
+                        else:
+                            # (void*)1 is always a non-NULL placeholder from the extractor;
+                            # construct a backing local variable for the pointed-to type
+                            base_type = type_str.replace('*', '').replace('const', '').strip() if type_str else None
+                            local = f"{var_name}_{field}_ptr_val"
+                            if base_type:
+                                code.append(f"{space}{base_type} {local} = {{}};")
+                                code.append(f"{space}{self._build_field_access(var_name, field)} = &{local};")
+                            else:
+                                code.append(f"{space}// TODO: {field} needs a non-NULL pointer; assign manually")
+                                code.append(f"{space}{self._build_field_access(var_name, field)} = NULL;")
+                            continue
                     code.append(f"{space}{self._build_field_access(var_name, field)} = {scalar_str};")
                     continue  # Skip further processing
 
@@ -348,18 +363,7 @@ class GTestBuilder:
                     nested = clean_val_dict['value']
                     # Check if nested dict itself contains just a 'value' key with scalar
                     if len(nested) == 1 and 'value' in nested and not isinstance(nested['value'], dict):
-                        scalar_value = nested['value']
-                        # Get type information if available from metadata
-                        type_str = fval.get('__type__', "")
-                        # Clean the scalar value (handles comment strings like "/* not NULL */")
-                        cleaned_value = self._clean_scalar_value(scalar_value, type_str)
-                        # Convert Python True/False to C true/false (after cleaning)
-                        if cleaned_value is True:
-                            scalar_str = "true"
-                        elif cleaned_value is False:
-                            scalar_str = "false"
-                        else:
-                            scalar_str = str(cleaned_value)
+                        scalar_str = self._clean_scalar_value(nested['value'])
                         code.append(f"{space}{self._build_field_access(var_name, field)} = {scalar_str};")
                         continue  # Skip further processing
 
@@ -385,46 +389,29 @@ class GTestBuilder:
                             code.append(f"{space}// Type unknown - replace 'UnknownType' with actual type")
                             code.append(f"{space}UnknownType {ptr_var_name} = {{}};")
 
-                        # Special case: if clean_val_dict contains just a 'value' key that is a dict
-                        # with a single 'value' key (scalar), treat it as a scalar field
-                        if len(clean_val_dict) == 1 and 'value' in clean_val_dict and isinstance(clean_val_dict['value'], dict):
-                            nested = clean_val_dict['value']
-                            if len(nested) == 1 and 'value' in nested and not isinstance(nested['value'], dict):
-                                scalar_value = nested['value']
-                                # Get type information if available from metadata
-                                type_str = fval.get('__type__', "")
-                                # Clean the scalar value (handles comment strings like "/* not NULL */")
-                                cleaned_value = self._clean_scalar_value(scalar_value, type_str)
-                                if cleaned_value is True:
-                                    scalar_str = "true"
-                                elif cleaned_value is False:
-                                    scalar_str = "false"
-                                else:
-                                    scalar_str = str(cleaned_value)
-                                code.append(f"{space}{ptr_var_name}.value = {scalar_str};")
-                                # Assign pointer to point to the local variable
-                                code.append(f"{space}{self._build_field_access(var_name, field)} = &{ptr_var_name};")
-                                continue  # Skip the rest of pointer processing
-
-                        # Generate assignments for fields of the pointed-to struct
+                        # Generate assignments for fields of the pointed-to struct.
+                        # Skip 'value' string entries — they represent the pointer's own
+                        # NULL/(void*)1 sentinel, not a field of the pointed-to struct.
                         for subfield, subval in clean_val_dict.items():
+                            if subfield == 'value' and not isinstance(subval, dict):
+                                continue  # pointer-value sentinel, not a struct field
                             if isinstance(subval, dict):
-                                # Nested struct under pointer
-                                nested_code = self._generate_field_assignments(
-                                    self._build_field_access(ptr_var_name, subfield), subval, indent
-                                )
-                                code.extend(nested_code)
+                                # Check if this is a scalar leaf: {value: X, __type__: Y}
+                                clean_subval = {k: v for k, v in subval.items()
+                                                if not (k.startswith('__') and k.endswith('__'))}
+                                if (len(clean_subval) == 1 and 'value' in clean_subval
+                                        and not isinstance(clean_subval['value'], dict)):
+                                    scalar_str = self._clean_scalar_value(clean_subval['value'])
+                                    code.append(f"{space}{self._build_field_access(ptr_var_name, subfield)} = {scalar_str};")
+                                else:
+                                    # Nested struct under pointer
+                                    nested_code = self._generate_field_assignments(
+                                        self._build_field_access(ptr_var_name, subfield), subval, indent
+                                    )
+                                    code.extend(nested_code)
                             else:
                                 # Scalar field under pointer
-                                # Clean the scalar value (handles comment strings like "/* not NULL */")
-                                # Type info not available here, pass empty string
-                                cleaned_subval = self._clean_scalar_value(subval, "")
-                                if cleaned_subval is True:
-                                    subval_str = "true"
-                                elif cleaned_subval is False:
-                                    subval_str = "false"
-                                else:
-                                    subval_str = str(cleaned_subval)
+                                subval_str = self._clean_scalar_value(subval)
                                 code.append(f"{space}{self._build_field_access(ptr_var_name, subfield)} = {subval_str};")
 
                         # Assign pointer to point to the local variable
@@ -437,16 +424,7 @@ class GTestBuilder:
                         code.extend(nested_code)
             else:
                 # Scalar value assignment
-                # Clean the scalar value (handles comment strings like "/* not NULL */")
-                # Type info not available here, pass empty string
-                cleaned_fval = self._clean_scalar_value(fval, "")
-                # Convert Python True/False to C true/false (after cleaning)
-                if cleaned_fval is True:
-                    fval_str = "true"
-                elif cleaned_fval is False:
-                    fval_str = "false"
-                else:
-                    fval_str = str(cleaned_fval)
+                fval_str = self._clean_scalar_value(fval)
                 code.append(f"{space}{self._build_field_access(var_name, field)} = {fval_str};")
         return code
 
@@ -466,20 +444,23 @@ class GTestBuilder:
 
             if is_ptr and not is_func_ptr:
                 base_type = g_type.replace('*', '').replace('const', '').strip()
+                backing = "char" if base_type == "void" else base_type
                 local = f"{g_name}_val"
                 if isinstance(val, dict):
                     # Pointer with struct field constraints: allocate backing local, assign fields
-                    code.append(f"    {base_type} {local} = {{}};")
+                    code.append(f"    {backing} {local} = {{}};")
                     # Generate field assignments (supports nested dictionaries)
                     field_assignments = self._generate_field_assignments(local, val)
                     code.extend(field_assignments)
                     code.append(f"    {g_name} = &{local};")
                 elif val is not None:
-                    # Scalar constraint on the pointer itself (e.g. NULL-check branch)
-                    code.append(f"    {g_name} = {val};")
+                    scalar = self._clean_scalar_value(val)
+                    if scalar == "(void*)1" and "char" in canon_type:
+                        scalar = '""'
+                    code.append(f"    {g_name} = {scalar};")
                 else:
                     # No constraint: allocate a zero-initialized backing local to avoid NULL deref
-                    code.append(f"    {base_type} {local} = {{}};")
+                    code.append(f"    {backing} {local} = {{}};")
                     code.append(f"    {g_name} = &{local};")
             else:
                 # Handle array types specially - array names cannot be assigned
@@ -498,7 +479,14 @@ class GTestBuilder:
                         field_assignments = self._generate_field_assignments(g_name, val)
                         code.extend(field_assignments)
                     else:
-                        code.append(f"    {g_name} = {val};")
+                        scalar = self._clean_scalar_value(val)
+                        if scalar == "(void*)1":
+                            if is_func_ptr:
+                                code.append(f"    // TODO: assign a valid function pointer to {g_name} to cover the non-NULL path")
+                                scalar = "NULL"
+                            elif "char" in canon_type:
+                                scalar = '""'
+                        code.append(f"    {g_name} = {scalar};")
                 else:
                     def_val = self._default_value(canon_type)
                     code.append(f"    {g_name} = {def_val};")
@@ -552,15 +540,46 @@ class GTestBuilder:
         # Check if this is a function pointer type (heuristic: contains "(*)" or ")(*" or "(*[")
         is_func_ptr = ('(*)' in ptype) or (')(*' in ptype) or ('(*[' in ptype)
 
+        # Handle array types (e.g., "int [10]") — must be formatted as "int arr[10]"
+        is_array_type = ('[' in ptype and ']' in ptype
+                         and '(*)' not in ptype and '(*[' not in ptype)
+        if is_array_type:
+            formatted = self._format_param_type(ptype, pname)
+            code.append(f"    {formatted} = {{}};")
+            if isinstance(val, dict):
+                field_assignments = self._generate_field_assignments(pname, val)
+                code.extend(field_assignments)
+            return code
+
         if is_struct_like:
             base_type = ptype.replace('*', '').replace('const', '').strip()
             if is_ptr:
                 local = f"{pname}_val"
-                code.append(f"    {base_type} {local} = {{}};")
-                # Generate field assignments (supports nested dictionaries)
-                field_assignments = self._generate_field_assignments(local, val)
-                code.extend(field_assignments)
-                code.append(f"    {ptype} {pname} = &{local};")
+                if base_type == "char":
+                    # For char pointers with subscript constraints, generate a char array
+                    max_idx = -1
+                    if isinstance(val, dict):
+                        for k in val.keys():
+                            if not (k.startswith('__') and k.endswith('__')):
+                                m2 = re.match(r'^\[(\d+)\]$', str(k))
+                                if m2:
+                                    max_idx = max(max_idx, int(m2.group(1)))
+                    arr_size = max(max_idx + 2, 8)
+                    code.append(f"    {base_type} {local}[{arr_size}] = {{}};")
+                    # Generate field assignments (supports nested dictionaries)
+                    field_assignments = self._generate_field_assignments(local, val)
+                    code.extend(field_assignments)
+                    # char arrays decay to char* — use without &
+                    code.append(f"    {ptype} {pname} = {local};")
+                else:
+                    if base_type == "void":
+                        code.append(f"    char {local} = {{}};")
+                    else:
+                        code.append(f"    {base_type} {local} = {{}};")
+                    # Generate field assignments (supports nested dictionaries)
+                    field_assignments = self._generate_field_assignments(local, val)
+                    code.extend(field_assignments)
+                    code.append(f"    {ptype} {pname} = &{local};")
             else:
                 code.append(f"    {ptype} {pname} = {{}};")
                 # Generate field assignments (supports nested dictionaries)
@@ -571,18 +590,46 @@ class GTestBuilder:
             # Skip for function pointers
             base_type = ptype.replace('*', '').replace('const', '').strip()
             local = f"{pname}_val"
-            code.append(f"    {base_type} {local} = {{}};")
+            backing = "char" if base_type == "void" else base_type
+            code.append(f"    {backing} {local} = {{}};")
             code.append(f"    {ptype} {pname} = &{local};")
         else:
             scalar = val if (val is not None and not isinstance(val, dict)) else self._default_value(canon_type)
-            # Clean comment-like values
-            if isinstance(scalar, str):
-                scalar = self._clean_scalar_value(scalar, canon_type)
+            scalar = self._clean_scalar_value(scalar)
+            # If the scalar is a /* TODO: */ placeholder (unresolvable negation) or references
+            # a function-internal local variable, fall back to the type default so the code compiles.
+            if scalar.startswith("/* TODO:") or self._has_local_var_in_expr(scalar):
+                scalar = self._default_value(canon_type)
+            # Treat small positive integers as non-NULL placeholders for pointer types
+            # (the bare boolean check in the extractor returns 1 for != 0 on pointer params)
+            if is_ptr and not is_func_ptr and re.match(r'^\d+$', scalar) and scalar not in ('0',):
+                scalar = "(void*)1"
+            # (void*)1 is a non-NULL placeholder — construct a real stack variable instead
+            if scalar == "(void*)1":
+                if is_func_ptr:
+                    # Cannot auto-construct a function; needs a real compatible function
+                    code.append(f"    // TODO: assign a valid function pointer to {pname} to cover the non-NULL path")
+                    scalar = "NULL"
+                else:
+                    base_type = ptype.replace('*', '').replace('const', '').strip()
+                    local = f"{pname}_val"
+                    if "char" in base_type:
+                        code.append(f"    {base_type} {local}[] = \"\";")
+                        code.append(f"    {ptype} {pname} = {local};")
+                    else:
+                        backing = "char" if base_type == "void" else base_type
+                        code.append(f"    {backing} {local} = {{}};")
+                        code.append(f"    {ptype} {pname} = &{local};")
+                    return code
             if is_func_ptr:
                 # Format function pointer type correctly: "int (*)(int, int)" -> "int (*pname)(int, int)"
                 formatted = self._format_param_type(ptype, pname)
                 code.append(f"    {formatted} = {scalar};")
             else:
+                # For non-basic types (e.g., enums), a numeric initializer needs an explicit cast
+                if (not is_ptr and re.match(r'^-?\d+$', str(scalar))
+                        and not self._is_basic_type(canon_type)):
+                    scalar = f"({ptype}){scalar}"
                 code.append(f"    {ptype} {pname} = {scalar};")
         return code
 
@@ -594,10 +641,25 @@ class GTestBuilder:
 
         if func.ret_type == "void":
             code.append(f"    {call_str}")
+            if self.construct:
+                # Placeholder assertions for observable side effects of void functions.
+                # 1. Writable (non-const) pointer params that are non-NULL in this path.
+                for p in func.params:
+                    pname = p['name']
+                    ptype = p['type']
+                    if '*' not in ptype or 'const' in ptype:
+                        continue
+                    val = path.param_values.get(pname)
+                    is_null = (val == 'NULL' or str(val) == 'NULL')
+                    if not is_null:
+                        code.append(f"    // EXPECT_EQ(*{pname}, /* expected */);")
+                # 2. Global variables modified in this function.
+                for g_name in func.global_vars:
+                    code.append(f"    // EXPECT_EQ({g_name}, /* expected */);")
             return code
 
         # Format return type with variable name, handling function pointer types
-        formatted_decl = self._format_type_and_name(func.ret_type, "result")
+        formatted_decl = self._format_type_and_name(self._c_to_cpp_type(func.ret_type), "result")
         code.append(f"    {formatted_decl} = {call_str}")
 
         if not self.construct or path.expected_return is None:
@@ -605,21 +667,124 @@ class GTestBuilder:
             return code
 
         ret_val = str(path.expected_return)
+        # GTest EXPECT_EQ can't compare pointer types with NULL (int 0); use nullptr instead
+        if ret_val == "NULL" and '*' in func.ret_type:
+            ret_val = "nullptr"
         if self._has_local_var_in_expr(ret_val):
             code.append(f"    // EXPECT_EQ(result, {ret_val}); // TODO: Cannot automatically resolve local variable '{ret_val}'")
+        elif self._condition_has_unconstrained_local(path, func) and not path.stub_constraints:
+            # Path condition references a local C variable that isn't a param/global,
+            # and no stub is installed to control it — inputs may not reach this branch.
+            code.append(f"    // EXPECT_EQ(result, {ret_val}); // NOTE: path condition involves a local variable; inputs may not trigger this branch")
+        elif self._condition_has_compound_operator(path, func):
+            # Path condition involves compound bitwise or division expressions (e.g. a & b, a / b).
+            # Constraint extraction for these is unreliable; inputs may not trigger this branch.
+            code.append(f"    // EXPECT_EQ(result, {ret_val}); // NOTE: compound bitwise/arithmetic condition; inputs may not trigger this branch")
         else:
             code.append(f"    EXPECT_EQ(result, {ret_val});")
         return code
 
+    def _condition_has_unconstrained_local(self, path, func):
+        """Check if the path's condition description references local C variables (not params/globals).
+
+        When a branch condition is on a local variable (e.g., `result > 1e38f` where `result`
+        is computed inside the function), the generated test inputs may not actually reach that
+        branch. In such cases, the EXPECT_EQ assertion could give a false failure.
+        """
+        param_names = {p['name'] for p in func.params}
+        global_names = set(func.global_vars.keys())
+        op_keywords = {'else', 'implicit', 'default'}
+        allowed = param_names | global_names | self.known_constants | op_keywords
+
+        def _desc_has_local(desc):
+            if not desc:
+                return False
+            clean = re.sub(r'(?<![A-Za-z_0-9])-?(?:0[xX][0-9a-fA-F]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)[fFlLuU]*', '', desc)
+            words = set(re.findall(r'[a-zA-Z_][a-zA-Z0-9_]*', clean))
+            return bool(words - allowed)
+
+        desc = path.description or ""
+        if _desc_has_local(desc):
+            return True
+        # For 'else' / 'else (implicit)' paths, also check the immediately preceding
+        # non-else sibling — if that sibling's condition references a local variable,
+        # this else branch also can't be reliably reached with the generated inputs.
+        if desc in ("else", "else (implicit)") and func.paths:
+            idx = func.paths.index(path)
+            for j in range(idx - 1, -1, -1):
+                prev_desc = func.paths[j].description or ""
+                if prev_desc not in ("else", "else (implicit)"):
+                    if _desc_has_local(prev_desc):
+                        return True
+                    # For multi-variable compound equality conditions like
+                    # "a == X && b == Y && c == Z" (row-matching patterns in orthogonal
+                    # arrays), the negated inputs for the else path may go out-of-range
+                    # and trigger an earlier validity check, making EXPECT_EQ unreliable.
+                    eq_matches = re.findall(r'\b\w+\s*==\s*\w+', prev_desc)
+                    if len(eq_matches) > 1 and '&&' in prev_desc:
+                        return True
+                    break
+        return False
+
+    def _condition_has_compound_operator(self, path, func):
+        """Check if this path (or any path in the same function chain) has a condition
+        involving compound bitwise or division expressions that the extractor can't reliably solve.
+
+        Detects conditions like '( flags & mask ) != 0', 'a / b > 10', or else-paths that
+        follow such conditions in an if-else chain.
+        """
+        # Check the path's own description for compound operators
+        if self._desc_has_compound_operator(path.description or ""):
+            return True
+        # For 'else' / 'else (implicit)' / 'default' paths, check if any sibling path
+        # in the same function has a compound-operator condition. If so, the else branch
+        # inherits accumulated wrong constraints from those negations.
+        desc = path.description or ""
+        if desc in ("else", "else (implicit)", "default") and func.paths:
+            for sibling in func.paths:
+                if sibling is path:
+                    continue
+                if self._desc_has_compound_operator(sibling.description or ""):
+                    return True
+        return False
+
+    @staticmethod
+    def _desc_has_compound_operator(desc):
+        """Return True if a path description contains compound operators that the constraint
+        extractor cannot reliably solve for individual variables.
+
+        This includes:
+        - Compound bitwise: a & b, a | b, a ^ b (not logical && / ||)
+        - Compound arithmetic in condition: a / b, a * b, a + b, a - b, a % b  OP  literal
+          (where the operands include at least two variables or a variable-arithmetic-variable expression)
+        - Complex negation: !(compound_expr)
+        """
+        if not desc:
+            return False
+        # Bitwise AND: ' & ' but not '&&'
+        if re.search(r'(?<![&])\s&\s(?![&])', desc):
+            return True
+        # Bitwise OR: ' | ' but not '||'
+        if re.search(r'(?<![|])\s\|\s(?![|])', desc):
+            return True
+        # Bitwise XOR: '^'
+        if '^' in desc:
+            return True
+        # Compound arithmetic in condition: two identifiers joined by +/-/*//%/ with comparison
+        # e.g. 'a + b > 100', 'a - b < 0', 'a * b == 0', 'a / b > 10', 'a % b == 0'
+        if re.search(r'\b\w+\s*[+\-*/%]\s*\w+\s*(?:>|>=|<|<=|==|!=)', desc):
+            return True
+        # Bitwise NOT / complex logical NOT over compound expr: '! ( expr )' where expr has operators
+        if re.search(r'!\s*\([^)]*\b\w+\s*(?:==|!=|>|<|>=|<=|&&|\|\|)\s*\w+[^)]*\)', desc):
+            return True
+        return False
+
     def _has_local_var_in_expr(self, expr):
         """Check if an expression contains local variable references."""
-        words = re.findall(r'[a-zA-Z_][a-zA-Z0-9_]*', expr)
-        for w in words:
-            if w in self.known_constants or w.isupper():
-                continue
-            if w not in ('true', 'false', 'nullptr', 'NULL'):
-                return True
-        return False
+        # Strip numeric/float literals first to avoid false positives like 1e38f, 0.0f
+        clean = re.sub(r'(?<![A-Za-z_0-9])-?(?:0[xX][0-9a-fA-F]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)[fFlLuU]*', '', expr)
+        words = re.findall(r'[a-zA-Z_][a-zA-Z0-9_]*', clean)
+        return any(w not in self.known_constants and not w.isupper() for w in words)
 
     def _format_type_and_name(self, type_str, name):
         """Format a type and variable name, handling function pointer types."""
@@ -673,40 +838,23 @@ class GTestBuilder:
         # Default to struct/empty initializer
         return cfg.struct_default
 
-    def _clean_scalar_value(self, value, canon_type_str=""):
-        """Clean scalar values that may be comments (e.g., '/* not NULL */') into valid C++ expressions."""
+    def _clean_scalar_value(self, value):
+        """Convert a scalar value to a valid C++ expression string.
+
+        Handles Python booleans (True/False → "true"/"false") and comment-form
+        placeholder strings like "/* not SOME_CONST */" produced by the constraint
+        extractor for unresolvable negated literals.
+        """
+        if value is True:
+            return "true"
+        if value is False:
+            return "false"
         if not isinstance(value, str):
-            return value
-
+            return str(value)
         value_str = value.strip()
-
-        # Check if it's a comment like "/* not X */"
         if value_str.startswith("/*") and value_str.endswith("*/"):
-            # Extract the inner content
             inner = value_str[2:-2].strip()
-            # Check for common patterns
             if inner.startswith("not "):
-                expr = inner[4:].strip()
-                # Handle specific patterns
-                if expr == "NULL":
-                    # For pointers, return a non-NULL value
-                    # If type info is not available, assume it's a pointer (common case)
-                    if '*' in canon_type_str or '(*)' in canon_type_str or canon_type_str == "":
-                        return "(void*)1"
-                    else:
-                        return "1"  # Default integer
-                elif "== NULL" in expr:
-                    # "not X == NULL" means X != NULL, return non-NULL
-                    return "(void*)1"
-                elif "!= NULL" in expr:
-                    # "not X != NULL" means X == NULL, return NULL
-                    return "NULL"
-                else:
-                    # Generic case: return a placeholder
-                    return f"/* TODO: {inner} */"
-            else:
-                # Some other comment, return NULL as safe default for pointers
-                return "NULL"
-
-        # Not a comment, return as-is
+                return f"/* TODO: {inner} */"
+            return f"/* TODO: unrecognized comment value: {inner} */"
         return value_str
