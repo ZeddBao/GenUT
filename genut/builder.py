@@ -10,6 +10,13 @@ from .config import GeneratorConfig
 class GTestBuilder:
     """Responsible for generating GTest framework code with configurable naming and defaults."""
 
+    # Compiled once at class level — used by _has_local_var_in_expr and _condition_has_unconstrained_local
+    _STRIP_LITERALS_PAT = re.compile(
+        r'(?<![A-Za-z_0-9])-?(?:0[xX][0-9a-fA-F]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)[fFlLuU]*'
+    )
+    # C++ keywords that are valid in generated code and must not be flagged as "local variables"
+    _CPP_KEYWORDS = frozenset({'true', 'false', 'nullptr', 'NULL'})
+
     def __init__(self, source_file, funcs_info, known_constants,
                  config: GeneratorConfig, outdir=None, project_includes=None, construct=False,
                  stub_framework=None, stub_builder=None):
@@ -133,14 +140,20 @@ class GTestBuilder:
         code.append(f"#endif // {guard}")
         return "\n".join(code)
 
+    @property
+    def _basic_type_pattern(self):
+        """Compiled regex for basic type keywords — cached on first access."""
+        if not hasattr(self, '_basic_type_pattern_cache'):
+            kws = self.config.basic_type_keywords
+            self._basic_type_pattern_cache = re.compile(
+                '|'.join(rf'\b{re.escape(k)}\b' for k in kws)
+            )
+        return self._basic_type_pattern_cache
+
     def _is_basic_type(self, canon_type_str):
         """Check if a type is considered a basic type."""
         t = canon_type_str.strip()
-        # Use word-boundary matching to avoid false positives like 'int' inside 'Point'
-        basic_keywords = self.config.basic_type_keywords
-        if '*' not in t and any(re.search(rf'\b{re.escape(k)}\b', t) for k in basic_keywords):
-            return True
-        return False
+        return '*' not in t and bool(self._basic_type_pattern.search(t))
 
     def _c_to_cpp_type(self, type_str):
         """Convert C type keywords to C++ compatible types."""
@@ -262,11 +275,12 @@ class GTestBuilder:
 
         # Declare scalar/basic params before struct params so array-subscript
         # references (e.g. items[index]) are already in scope when struct fields are set.
+        param_order = {p['name']: i for i, p in enumerate(func.params)}
         def _is_struct_param(p):
             val = path.param_values.get(p['name'])
             canon = self._c_to_cpp_type(p['canonical_type'])
             return isinstance(val, dict) and not self._is_basic_type(canon)
-        ordered_params = sorted(func.params, key=lambda p: (1 if _is_struct_param(p) else 0, func.params.index(p)))
+        ordered_params = sorted(func.params, key=lambda p: (1 if _is_struct_param(p) else 0, param_order[p['name']]))
         for param in ordered_params:
             code.extend(self._build_param_init(param, path.param_values, path_index))
 
@@ -428,6 +442,11 @@ class GTestBuilder:
                 code.append(f"{space}{self._build_field_access(var_name, field)} = {fval_str};")
         return code
 
+    @staticmethod
+    def _backing_type(base_type):
+        """Return 'char' in place of 'void' (void locals are illegal in C/C++)."""
+        return "char" if base_type == "void" else base_type
+
     def _build_global_var_setup(self, global_vars, param_values):
         """Build global variable setup code."""
         code = []
@@ -444,12 +463,11 @@ class GTestBuilder:
 
             if is_ptr and not is_func_ptr:
                 base_type = g_type.replace('*', '').replace('const', '').strip()
-                backing = "char" if base_type == "void" else base_type
+                backing = self._backing_type(base_type)
                 local = f"{g_name}_val"
                 if isinstance(val, dict):
                     # Pointer with struct field constraints: allocate backing local, assign fields
                     code.append(f"    {backing} {local} = {{}};")
-                    # Generate field assignments (supports nested dictionaries)
                     field_assignments = self._generate_field_assignments(local, val)
                     code.extend(field_assignments)
                     code.append(f"    {g_name} = &{local};")
@@ -475,7 +493,6 @@ class GTestBuilder:
                 elif val is not None:
                     if isinstance(val, dict):
                         code.append(f"    {g_name} = {{}}; // Reset struct to avoid interference")
-                        # Generate field assignments (supports nested dictionaries)
                         field_assignments = self._generate_field_assignments(g_name, val)
                         code.extend(field_assignments)
                     else:
@@ -503,8 +520,6 @@ class GTestBuilder:
             return param_type.replace('(*)', f'(*{param_name})')
         # Handle array of function pointers like "int (*[4])(int, int)" -> "int (*param_name[4])(int, int)"
         elif '(*[' in param_type:
-            # Find the closing bracket after the opening [
-            import re
             pattern = r'\(\*\[([^\]]+)\]\)'
             match = re.search(pattern, param_type)
             if match:
@@ -556,7 +571,6 @@ class GTestBuilder:
             if is_ptr:
                 local = f"{pname}_val"
                 if base_type == "char":
-                    # For char pointers with subscript constraints, generate a char array
                     max_idx = -1
                     if isinstance(val, dict):
                         for k in val.keys():
@@ -566,31 +580,25 @@ class GTestBuilder:
                                     max_idx = max(max_idx, int(m2.group(1)))
                     arr_size = max(max_idx + 2, 8)
                     code.append(f"    {base_type} {local}[{arr_size}] = {{}};")
-                    # Generate field assignments (supports nested dictionaries)
                     field_assignments = self._generate_field_assignments(local, val)
                     code.extend(field_assignments)
                     # char arrays decay to char* — use without &
                     code.append(f"    {ptype} {pname} = {local};")
                 else:
-                    if base_type == "void":
-                        code.append(f"    char {local} = {{}};")
-                    else:
-                        code.append(f"    {base_type} {local} = {{}};")
-                    # Generate field assignments (supports nested dictionaries)
+                    backing = self._backing_type(base_type)
+                    code.append(f"    {backing} {local} = {{}};")
                     field_assignments = self._generate_field_assignments(local, val)
                     code.extend(field_assignments)
                     code.append(f"    {ptype} {pname} = &{local};")
             else:
                 code.append(f"    {ptype} {pname} = {{}};")
-                # Generate field assignments (supports nested dictionaries)
                 field_assignments = self._generate_field_assignments(pname, val)
                 code.extend(field_assignments)
         elif is_ptr and val is None and not self._is_basic_type(canon_type) and not is_func_ptr:
             # Non-basic pointer with no constraint: allocate a backing local to avoid NULL deref
-            # Skip for function pointers
             base_type = ptype.replace('*', '').replace('const', '').strip()
             local = f"{pname}_val"
-            backing = "char" if base_type == "void" else base_type
+            backing = self._backing_type(base_type)
             code.append(f"    {backing} {local} = {{}};")
             code.append(f"    {ptype} {pname} = &{local};")
         else:
@@ -617,7 +625,7 @@ class GTestBuilder:
                         code.append(f"    {base_type} {local}[] = \"\";")
                         code.append(f"    {ptype} {pname} = {local};")
                     else:
-                        backing = "char" if base_type == "void" else base_type
+                        backing = self._backing_type(base_type)
                         code.append(f"    {backing} {local} = {{}};")
                         code.append(f"    {ptype} {pname} = &{local};")
                     return code
@@ -696,15 +704,8 @@ class GTestBuilder:
         op_keywords = {'else', 'implicit', 'default'}
         allowed = param_names | global_names | self.known_constants | op_keywords
 
-        def _desc_has_local(desc):
-            if not desc:
-                return False
-            clean = re.sub(r'(?<![A-Za-z_0-9])-?(?:0[xX][0-9a-fA-F]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)[fFlLuU]*', '', desc)
-            words = set(re.findall(r'[a-zA-Z_][a-zA-Z0-9_]*', clean))
-            return bool(words - allowed)
-
         desc = path.description or ""
-        if _desc_has_local(desc):
+        if desc and self._has_local_var_in_expr(desc, allowed=allowed):
             return True
         # For 'else' / 'else (implicit)' paths, also check the immediately preceding
         # non-else sibling — if that sibling's condition references a local variable,
@@ -714,7 +715,7 @@ class GTestBuilder:
             for j in range(idx - 1, -1, -1):
                 prev_desc = func.paths[j].description or ""
                 if prev_desc not in ("else", "else (implicit)"):
-                    if _desc_has_local(prev_desc):
+                    if self._has_local_var_in_expr(prev_desc, allowed=allowed):
                         return True
                     # For multi-variable compound equality conditions like
                     # "a == X && b == Y && c == Z" (row-matching patterns in orthogonal
@@ -779,20 +780,23 @@ class GTestBuilder:
             return True
         return False
 
-    def _has_local_var_in_expr(self, expr):
-        """Check if an expression contains local variable references."""
-        # Strip numeric/float literals first to avoid false positives like 1e38f, 0.0f
-        clean = re.sub(r'(?<![A-Za-z_0-9])-?(?:0[xX][0-9a-fA-F]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)[fFlLuU]*', '', expr)
+    def _has_local_var_in_expr(self, expr, allowed=None):
+        """Check if an expression contains local variable references.
+
+        When `allowed` is provided, any identifier in that set is treated as known.
+        When omitted, known_constants + all-caps identifiers + C++ keywords are allowed.
+        """
+        clean = self._STRIP_LITERALS_PAT.sub('', expr)
         words = re.findall(r'[a-zA-Z_][a-zA-Z0-9_]*', clean)
-        return any(w not in self.known_constants and not w.isupper() for w in words)
+        if allowed is not None:
+            return bool(set(words) - allowed - self._CPP_KEYWORDS)
+        return any(
+            w not in self.known_constants and not w.isupper() and w not in self._CPP_KEYWORDS
+            for w in words
+        )
 
     def _format_type_and_name(self, type_str, name):
         """Format a type and variable name, handling function pointer types."""
-        # Check if this is a function pointer type (contains "(*)" or ends with ")(*)")
-        # For function pointer types like "int (*)(int, int)", we need to insert the name
-        # to get "int (*name)(int, int)"
-        import re
-
         # Pattern for function pointer types: return_type (*)(params)
         # Match patterns like "int (*)(int, int)" or "void (*)(void)"
         func_ptr_pattern = r'^([^(]+)\(\s*\*\s*\)\s*\(([^)]*)\)$'
