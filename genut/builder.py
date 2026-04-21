@@ -115,7 +115,12 @@ class GTestBuilder:
                     fixed_type = g_type.replace('(*)', f'(*{g_name})')
                     code.append(f"extern {fixed_type};")
                 else:
-                    code.append(f"extern {g_type} {g_name};")
+                    # If type ends with *, don't add space between type and name
+                    g_type_stripped = g_type.rstrip()
+                    if g_type_stripped.endswith('*'):
+                        code.append(f"extern {g_type_stripped}{g_name};")
+                    else:
+                        code.append(f"extern {g_type_stripped} {g_name};")
             code.append("")
 
         code.append("// --- Target Function Declarations ---")
@@ -535,7 +540,11 @@ class GTestBuilder:
                 array_part = '[' + type_parts[1]
                 return f"{base_type} {param_name}{array_part}"
         # Default: just type followed by name
-        return f"{param_type} {param_name}"
+        # If type ends with *, don't add space between type and name
+        param_type_stripped = param_type.rstrip()
+        if param_type_stripped.endswith('*'):
+            return f"{param_type_stripped}{param_name}"
+        return f"{param_type_stripped} {param_name}"
 
     def _build_param_init(self, param, param_values, path_index):
         """Build parameter initialization code."""
@@ -815,7 +824,11 @@ class GTestBuilder:
             return f"{return_type} (*{name})({params})"
 
         # Not a function pointer type, use normal formatting
-        return f"{type_str} {name}"
+        # If type ends with *, don't add space between type and name
+        type_str_stripped = type_str.rstrip()
+        if type_str_stripped.endswith('*'):
+            return f"{type_str_stripped}{name}"
+        return f"{type_str_stripped} {name}"
 
     def _default_value(self, canon_type_str):
         """Get default value for a type using configuration."""

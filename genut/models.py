@@ -70,7 +70,11 @@ class FunctionInfo:
                 array_part = '[' + type_parts[1]
                 return f"{base_type} {param_name}{array_part}"
         # Default: just type followed by name
-        return f"{param_type} {param_name}"
+        # If type ends with *, don't add space between type and name
+        param_type_stripped = param_type.rstrip()
+        if param_type_stripped.endswith('*'):
+            return f"{param_type_stripped}{param_name}"
+        return f"{param_type_stripped} {param_name}"
 
     def get_declaration(self):
         """Generate C language declaration for the function."""

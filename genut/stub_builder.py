@@ -90,7 +90,11 @@ class StubBuilder:
                 array_part = '[' + type_parts[1]
                 return f"{base_type} {param_name}{array_part}"
         # Default: just type followed by name
-        return f"{param_type} {param_name}"
+        # If type ends with *, don't add space between type and name
+        param_type_stripped = param_type.rstrip()
+        if param_type_stripped.endswith('*'):
+            return f"{param_type_stripped}{param_name}"
+        return f"{param_type_stripped} {param_name}"
 
     def _format_function_declaration(self, ret_type, func_name, param_str):
         """Format a function declaration, handling function pointer return types."""
@@ -101,7 +105,11 @@ class StubBuilder:
             return ret_type.replace("(*)", f"(*{func_name}({param_str}))")
         else:
             # Normal function declaration
-            return f"{ret_type} {func_name}({param_str})"
+            # If return type ends with *, don't add space between type and name
+            ret_type_stripped = ret_type.rstrip()
+            if ret_type_stripped.endswith('*'):
+                return f"{ret_type_stripped}{func_name}({param_str})"
+            return f"{ret_type_stripped} {func_name}({param_str})"
 
     def build_stub_cpp(self):
         """Generate the full content of the _stub.cpp file."""
