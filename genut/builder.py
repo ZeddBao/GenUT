@@ -546,6 +546,31 @@ class GTestBuilder:
             return f"{param_type_stripped}{param_name}"
         return f"{param_type_stripped} {param_name}"
 
+    def _get_alternative_value(self, canon_type_str, avoid_values=None):
+        """Get an alternative scalar value, avoiding conflict with other path values.
+
+        When a constraint resolution fails (e.g., unresolvable macro), use this to generate
+        a fallback value that doesn't match values used in other paths for the same parameter.
+        """
+        if avoid_values is None:
+            avoid_values = set()
+
+        default_val = self._default_value(canon_type_str)
+
+        # For numeric types, try to find an alternative if default conflicts
+        if re.match(r'^-?\d+$', str(default_val)):
+            try:
+                current = int(default_val)
+                # Try a few alternatives: current+1, current-1, current+2, etc.
+                for offset in [1, -1, 2, -2, 3, -3]:
+                    alternative = current + offset
+                    if str(alternative) not in avoid_values and alternative >= 0:
+                        return str(alternative)
+            except (ValueError, TypeError):
+                pass
+
+        return default_val
+
     def _build_param_init(self, param, param_values, path_index):
         """Build parameter initialization code."""
         code = []
@@ -616,7 +641,14 @@ class GTestBuilder:
             # If the scalar is a /* TODO: */ placeholder (unresolvable negation) or references
             # a function-internal local variable, fall back to the type default so the code compiles.
             if scalar.startswith("/* TODO:") or self._has_local_var_in_expr(scalar):
-                scalar = self._default_value(canon_type)
+                # Collect values used by other paths to avoid collision
+                avoid_values = set()
+                func = self.funcs_info[0]  # Assuming current function is first
+                for path in func.paths:
+                    path_val = path.param_values.get(pname)
+                    if path_val is not None and not isinstance(path_val, dict):
+                        avoid_values.add(str(path_val))
+                scalar = self._get_alternative_value(canon_type, avoid_values)
             # Treat small positive integers as non-NULL placeholders for pointer types
             # (the bare boolean check in the extractor returns 1 for != 0 on pointer params)
             if is_ptr and not is_func_ptr and re.match(r'^\d+$', scalar) and scalar not in ('0',):
