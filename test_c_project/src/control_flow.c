@@ -11,6 +11,12 @@
 #include "control_flow.h"
 #include <stddef.h>
 
+/* Macro constants used in control flow conditions */
+#define DEFAULT_STATUS 0
+#define SUCCESS_CODE 1
+#define ERROR_CODE -1
+#define MAX_RETRIES 3
+
 /* ==================== 2.1 条件分支覆盖 ==================== */
 
 /* ----- if/else语句 ----- */
@@ -378,4 +384,73 @@ int bitwise_in_condition(int flags, int mask)
     } else {
         return 0; // 其他情况
     }
+}
+
+/* ==================== 测试宏定义条件回退场景 ==================== */
+
+/**
+ * @brief 使用宏定义条件的控制流测试
+ *
+ * 此函数用于测试修复的问题场景：
+ * 当if分支条件使用宏定义时（如 status == DEFAULT_STATUS），
+ * else分支参数回退到默认值，可能与if分支的条件值冲突。
+ *
+ * 例如：
+ * - if (status == DEFAULT_STATUS) { ... }  // DEFAULT_STATUS=0
+ * - else { ... }  // 此时status应该 != 0，不应该再次 = 0
+ *
+ * 修复前：else分支可能因为参数值回退到0而无法真正进入
+ * 修复后：系统会选择一个不与DEFAULT_STATUS冲突的值（如1）
+ */
+int macro_defined_condition_test(int status, int retries)
+{
+    // 主条件使用宏定义
+    if (status == DEFAULT_STATUS) {
+        // 初始化状态：继续重试
+        if (retries < MAX_RETRIES) {
+            return 10; // 可以重试
+        } else {
+            return 11; // 重试次数已用尽
+        }
+    } else if (status == SUCCESS_CODE) {
+        // 成功状态
+        return 20;
+    } else if (status == ERROR_CODE) {
+        // 错误状态
+        return 30;
+    } else {
+        // 其他未知状态
+        return 40;
+    }
+}
+
+/**
+ * @brief 多重宏定义条件测试
+ *
+ * 测试多个参数都使用宏定义条件时的场景，
+ * 验证每个else分支的参数值都能避免与对应if分支的冲突。
+ */
+int multiple_macro_conditions(int code, int level)
+{
+    int result = 0;
+
+    // 第一个参数使用宏定义条件
+    if (code == DEFAULT_STATUS) {
+        result = 100;
+    } else if (code == SUCCESS_CODE) {
+        result = 200;
+    } else {
+        result = 300;
+    }
+
+    // 第二个参数也使用宏定义条件
+    if (level == MAX_RETRIES) {
+        result += 1000;
+    } else if (level == 0) {
+        result += 2000;
+    } else {
+        result += 3000;
+    }
+
+    return result;
 }
