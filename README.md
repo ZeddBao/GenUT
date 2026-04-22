@@ -44,7 +44,7 @@ bear -- make
 | `generate_tests` | 生成指定函数的单元测试代码 |
 | `analyze_function` | 分析特定函数的结构和测试路径 |
 
-Claude Code 会通过 `.mcp.json` 自动发现此服务。详见 [MCP_SKILL_README.md](MCP_SKILL_README.md)。
+Claude Code 会通过 `.mcp.json` 自动发现此服务。
 
 ## 快速开始
 
