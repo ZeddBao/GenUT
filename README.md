@@ -34,7 +34,21 @@ cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ..
 bear -- make
 ```
 
+## MCP 服务（Agent 集成）
+
+项目集成了 **FastMcp** 服务，可被 Claude agents 调用。三个可用工具：
+
+| 工具 | 功能 |
+|---|---|
+| `list_functions` | 列出源文件中的所有函数及其元数据 |
+| `generate_tests` | 生成指定函数的单元测试代码 |
+| `analyze_function` | 分析特定函数的结构和测试路径 |
+
+Claude Code 会通过 `.mcp.json` 自动发现此服务。详见 [MCP_SKILL_README.md](MCP_SKILL_README.md)。
+
 ## 快速开始
+
+### CLI 方式
 
 ```bash
 # 基础生成
@@ -48,6 +62,34 @@ python gen_ut.py --compdb compile_commands.json --src src/control_flow.c --const
 
 # 启用宏式 stub 生成
 python gen_ut.py --compdb compile_commands.json --src src/stub_dependency.c --construct --stub-framework macro
+```
+
+### MCP 方式（Agent）
+
+Agent 可以直接调用 MCP 工具：
+
+```python
+# 列出源文件中的所有函数
+list_functions(
+    source_file="src/control_flow.c",
+    compdb="build/compile_commands.json"
+)
+
+# 为指定函数生成测试
+generate_tests(
+    source_file="src/control_flow.c",
+    compdb="build/compile_commands.json",
+    functions="func1;func2",
+    construct=True,
+    outdir="tests"
+)
+
+# 分析特定函数
+analyze_function(
+    source_file="src/control_flow.c",
+    compdb="build/compile_commands.json",
+    function_name="func1"
+)
 ```
 
 ## 命令行参数
