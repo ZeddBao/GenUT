@@ -8,8 +8,8 @@ test_c_project/build/
 test_c_project/compile_commands.json
 
 # Generated test files
-test_c_project/test/ut_*.cpp
-test_c_project/test/ut_*.h
+test_c_project/tests/ut_*.cpp
+test_c_project/tests/ut_*.h
 
 # Claude Code local-only configuration (personal permissions, not shared)
 .claude/settings.local.json
