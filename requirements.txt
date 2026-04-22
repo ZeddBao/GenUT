@@ -1,2 +1,3 @@
 # Requirements for genut
 libclang
+fastmcp>=0.1.0
