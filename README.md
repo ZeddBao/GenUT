@@ -21,7 +21,7 @@
 - Python 包：
 
 ```bash
-pip install libclang
+pip install libclang fastmcp
 ```
 
 ### 生成编译数据库
@@ -34,19 +34,7 @@ cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ..
 bear -- make
 ```
 
-## MCP 服务（Agent 集成）
-
-项目集成了 **FastMcp** 服务，可被 Claude agents 调用。可用工具：
-
-| 工具 | 功能 |
-| --- | --- |
-| `generate_tests` | 生成指定函数的单元测试代码 |
-
-Claude Code 会通过 `.mcp.json` 自动发现此服务。
-
 ## 快速开始
-
-### CLI 方式
 
 ```bash
 # 基础生成
@@ -62,22 +50,39 @@ python gen_ut.py --compdb compile_commands.json --src src/control_flow.c --const
 python gen_ut.py --compdb compile_commands.json --src src/stub_dependency.c --construct --stub-framework macro
 ```
 
-### MCP 方式（Agent）
+## Claude Code 集成
 
-Claude Code 会自动通过 MCP 调用生成测试工具。示例参数：
+克隆项目后用 Claude Code 打开，MCP 服务和 `/genut` skill 会自动生效，无需额外配置。
+
+### MCP 服务
+
+项目通过 `.mcp.json` 注册 MCP 服务，Claude Code 自动发现并启动。可用工具：
+
+| 工具 | 功能 |
+| --- | --- |
+| `generate_tests` | 生成指定 C 源文件的 GTest 单元测试 |
+
+输出文件：
+- `ut_<module>.h` — extern "C" 声明 + stub 声明
+- `ut_<module>.cpp` — GTest 测试用例
+- `ut_<module>_stub.cpp` — Stub 实现（启用 stub_framework 时）
+
+### /genut Skill
+
+在 Claude Code 中直接使用 `/genut` 触发测试生成：
 
 ```
-source_file: src/control_flow.c
-compdb: build/compile_commands.json
-functions: func1;func2
-construct: true
-outdir: tests
+/genut <source_file> [project_root] [outdir] [functions]
 ```
 
-工具会生成：
-- `ut_control_flow.h` - 测试头文件
-- `ut_control_flow.cpp` - GTest 测试用例
-- `ut_control_flow_stub.cpp` - Stub 实现（如果启用 stub_framework）
+| 参数 | 说明 |
+| --- | --- |
+| `source_file` | C 源文件路径（必需） |
+| `project_root` | 项目根目录；不填则询问 |
+| `outdir` | 测试文件输出目录；不填则询问 |
+| `functions` | 目标函数列表，分号分隔；不填则生成全部 |
+
+也可以直接用自然语言（"帮我给这个文件生成单元测试"），Claude 会自动触发 skill。
 
 ## 命令行参数
 
@@ -132,12 +137,6 @@ outdir: tests
 
 启用 `--stub-framework macro` 时，会额外分析被测函数中的外部调用，并生成对应 stub 代码。
 
-典型输出：
-
-- `ut_<module>.h`
-- `ut_<module>.cpp`
-- `ut_<module>_stub.cpp`（仅启用 stub 时）
-
 当前限制：
 
 - 仅支持直接函数调用（不支持函数指针调用）
@@ -171,7 +170,7 @@ cd test_c_project
 基于示例生成测试：
 
 ```bash
-python gen_ut.py --compdb test_c_project/compile_commands.json --src test_c_project/src/control_flow.c --outdir test_c_project/test
+python gen_ut.py --compdb test_c_project/compile_commands.json --src test_c_project/src/control_flow.c --outdir test_c_project/tests
 ```
 
 ## 限制
