@@ -1,5 +1,4 @@
 __pycache__
-.claude
 .cache
 # 项目特定忽略
 utgen.json
@@ -12,5 +11,5 @@ test_c_project/compile_commands.json
 test_c_project/test/ut_*.cpp
 test_c_project/test/ut_*.h
 
-# Claude Code configuration
-.claude/
+# Claude Code local-only configuration (personal permissions, not shared)
+.claude/settings.local.json

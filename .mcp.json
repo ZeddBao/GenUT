@@ -3,7 +3,7 @@
     "genut": {
       "command": "python",
       "args": [
-        "d:/CCWorkspace/genut/mcp_server.py"
+        "mcp_server.py"
       ]
     }
   }

@@ -36,13 +36,11 @@ bear -- make
 
 ## MCP 服务（Agent 集成）
 
-项目集成了 **FastMcp** 服务，可被 Claude agents 调用。三个可用工具：
+项目集成了 **FastMcp** 服务，可被 Claude agents 调用。可用工具：
 
 | 工具 | 功能 |
-|---|---|
-| `list_functions` | 列出源文件中的所有函数及其元数据 |
+| --- | --- |
 | `generate_tests` | 生成指定函数的单元测试代码 |
-| `analyze_function` | 分析特定函数的结构和测试路径 |
 
 Claude Code 会通过 `.mcp.json` 自动发现此服务。
 
@@ -66,31 +64,20 @@ python gen_ut.py --compdb compile_commands.json --src src/stub_dependency.c --co
 
 ### MCP 方式（Agent）
 
-Agent 可以直接调用 MCP 工具：
+Claude Code 会自动通过 MCP 调用生成测试工具。示例参数：
 
-```python
-# 列出源文件中的所有函数
-list_functions(
-    source_file="src/control_flow.c",
-    compdb="build/compile_commands.json"
-)
-
-# 为指定函数生成测试
-generate_tests(
-    source_file="src/control_flow.c",
-    compdb="build/compile_commands.json",
-    functions="func1;func2",
-    construct=True,
-    outdir="tests"
-)
-
-# 分析特定函数
-analyze_function(
-    source_file="src/control_flow.c",
-    compdb="build/compile_commands.json",
-    function_name="func1"
-)
 ```
+source_file: src/control_flow.c
+compdb: build/compile_commands.json
+functions: func1;func2
+construct: true
+outdir: tests
+```
+
+工具会生成：
+- `ut_control_flow.h` - 测试头文件
+- `ut_control_flow.cpp` - GTest 测试用例
+- `ut_control_flow_stub.cpp` - Stub 实现（如果启用 stub_framework）
 
 ## 命令行参数
 
