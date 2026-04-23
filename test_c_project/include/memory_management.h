@@ -21,13 +21,6 @@ extern "C" {
 /* ==================== 4.1 分配/释放测试 ==================== */
 
 /**
- * @brief malloc分配测试：分配成功/失败场景
- * @param size 要分配的内存大小
- * @return 成功返回分配的内存指针，失败返回NULL
- */
-void* malloc_test(size_t size);
-
-/**
  * @brief calloc分配测试：分配并清零内存
  * @param num 元素数量
  * @param size 每个元素的大小

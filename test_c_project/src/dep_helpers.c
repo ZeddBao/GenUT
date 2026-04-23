@@ -10,6 +10,7 @@
 #include "dep_helpers.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 /*============================================================================
  * Basic functions (used as function pointer targets)
@@ -46,6 +47,32 @@ void print_message(const char* msg)
     if (msg != NULL) {
         printf("Message: %s\n", msg);
     }
+}
+
+/*============================================================================
+ * Memory allocation helpers
+ *===========================================================================*/
+
+void* malloc_test(size_t size)
+{
+    if (size == 0) {
+        return NULL;
+    }
+    if (size > 1024 * 1024 * 1024) {
+        return NULL;
+    }
+    return malloc(size);
+}
+
+void* null_pointer_return(size_t size)
+{
+    if (size == 0) {
+        return NULL;
+    }
+    if (size > 1024 * 1024) {
+        return NULL;
+    }
+    return malloc(size);
 }
 
 /*============================================================================

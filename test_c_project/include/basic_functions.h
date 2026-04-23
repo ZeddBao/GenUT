@@ -21,14 +21,6 @@ extern "C" {
 /* ==================== 1.1 简单函数测试 ==================== */
 
 /**
- * @brief 纯函数示例：无副作用，仅基于输入返回输出
- * @param a 整数参数
- * @param b 整数参数
- * @return 两个参数的和
- */
-int pure_function_add(int a, int b);
-
-/**
  * @brief 无参数函数示例：测试全局状态变化或常量返回值
  * @return 固定的常量值
  */
@@ -175,13 +167,6 @@ int normal_return_function(int value);
  * @return 成功返回0，失败返回负数错误码
  */
 int error_code_return_function(int operation);
-
-/**
- * @brief NULL指针返回示例：分配失败场景
- * @param size 要分配的大小
- * @return 成功返回分配的内存指针，失败返回NULL
- */
-void* null_pointer_return_function(size_t size);
 
 /**
  * @brief 布尔返回值示例：true/false分支

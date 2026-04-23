@@ -56,13 +56,6 @@ bool format_check(const char* str);
 /* ==================== 5.2 错误路径测试 ==================== */
 
 /**
- * @brief 资源分配失败测试：malloc返回NULL
- * @param size 要分配的大小
- * @return 成功返回分配的内存指针，失败返回NULL
- */
-void* allocation_failure_test(size_t size);
-
-/**
  * @brief 文件操作失败测试：模拟fopen失败
  * @param filename 文件名
  * @param mode 打开模式
@@ -78,14 +71,6 @@ void* file_operation_failure_test(const char* filename, const char* mode);
 int system_call_failure_test(int operation);
 
 /* ==================== 5.3 异常情况测试 ==================== */
-
-/**
- * @brief 除零错误测试：分母为零的情况
- * @param numerator 分子
- * @param denominator 分母
- * @return 除法结果，如果分母为零则返回0
- */
-int divide_by_zero_test(int numerator, int denominator);
 
 /**
  * @brief 整数溢出测试：加法溢出

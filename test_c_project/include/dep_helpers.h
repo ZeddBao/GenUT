@@ -2,9 +2,10 @@
  * @file dep_helpers.h
  * @brief 辅助函数声明
  *
- * 包含两类辅助函数：
+ * 包含三类辅助函数：
  * 1. 基本运算函数（add/sub/mul/div_safe/print_message）：作为函数指针目标被间接调用
- * 2. 依赖桩函数（dep_*）：被 stub_dependency.c 中的被测函数直接调用，
+ * 2. 内存分配辅助（malloc_test/null_pointer_return）：模拟分配成功/失败场景
+ * 3. 依赖桩函数（dep_*）：被 stub_dependency.c 中的被测函数直接调用，
  *    测试时通过 INSTALL_STUB 替换以覆盖全部分支路径
  */
 
@@ -12,6 +13,7 @@
 #define DEP_HELPERS_H
 
 #include <stddef.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -26,6 +28,17 @@ int sub(int a, int b);
 int mul(int a, int b);
 int div_safe(int a, int b);
 void print_message(const char* msg);
+
+/*============================================================================
+ * Memory allocation helpers
+ * 模拟分配成功/失败场景，合并自 basic_functions、error_handling、memory_management
+ *===========================================================================*/
+
+/** 分配 size 字节；size==0 或 >1GB 时返回 NULL，模拟大内存分配失败。 */
+void* malloc_test(size_t size);
+
+/** 分配 size 字节；size==0 或 >1MB 时返回 NULL，模拟严格限制场景。 */
+void* null_pointer_return(size_t size);
 
 /*============================================================================
  * Stub dependency functions (direct calls, not function pointers)

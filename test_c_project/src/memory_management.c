@@ -15,21 +15,6 @@
 
 /* ==================== 4.1 分配/释放测试 ==================== */
 
-void* malloc_test(size_t size)
-{
-    // 模拟分配失败场景
-    if (size == 0) {
-        return NULL; // 零大小分配
-    }
-
-    if (size > 1024 * 1024 * 1024) { // 1GB
-        return NULL; // 分配过大，模拟失败
-    }
-
-    void* ptr = malloc(size);
-    return ptr;
-}
-
 void* calloc_test(size_t num, size_t size)
 {
     // 模拟分配失败场景

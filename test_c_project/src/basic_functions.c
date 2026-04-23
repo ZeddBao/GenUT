@@ -18,15 +18,6 @@ static int global_counter = 0;
 /* ==================== 1.1 简单函数测试 ==================== */
 
 /**
- * @brief 纯函数示例：无副作用，仅基于输入返回输出
- */
-int pure_function_add(int a, int b)
-{
-    // 纯函数：无副作用，仅依赖输入参数
-    return a + b;
-}
-
-/**
  * @brief 无参数函数示例：测试全局状态变化或常量返回值
  */
 int no_parameter_function(void)
@@ -311,29 +302,6 @@ int error_code_return_function(int operation)
         default:
             return -99; // 未知错误
     }
-}
-
-/**
- * @brief NULL指针返回示例：分配失败场景
- */
-void* null_pointer_return_function(size_t size)
-{
-    // 模拟内存分配失败场景
-    if (size == 0) {
-        return NULL; // 零大小分配返回NULL
-    }
-
-    if (size > 1024 * 1024) {
-        return NULL; // 分配太大，模拟失败
-    }
-
-    // 模拟成功分配
-    void* ptr = malloc(size);
-    if (ptr == NULL) {
-        return NULL; // 真实分配失败
-    }
-
-    return ptr;
 }
 
 /**

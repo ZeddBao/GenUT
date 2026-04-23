@@ -95,21 +95,6 @@ bool format_check(const char* str)
 
 /* ==================== 5.2 错误路径测试 ==================== */
 
-void* allocation_failure_test(size_t size)
-{
-    // 模拟分配失败场景
-    if (size == 0) {
-        return NULL; // 零大小分配
-    }
-
-    if (size > 1024 * 1024 * 1024) { // 1GB
-        return NULL; // 分配过大，模拟失败
-    }
-
-    void* ptr = malloc(size);
-    return ptr;
-}
-
 void* file_operation_failure_test(const char* filename, const char* mode)
 {
     // 模拟文件操作失败
@@ -174,16 +159,6 @@ int system_call_failure_test(int operation)
 }
 
 /* ==================== 5.3 异常情况测试 ==================== */
-
-int divide_by_zero_test(int numerator, int denominator)
-{
-    // 除零错误测试
-    if (denominator == 0) {
-        return 0; // 避免除零，返回0
-    }
-
-    return numerator / denominator;
-}
 
 int integer_overflow_test(int a, int b)
 {
