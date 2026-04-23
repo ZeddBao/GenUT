@@ -14,55 +14,6 @@
 #include <limits.h>
 
 /*============================================================================
- * Basic functions
- *===========================================================================*/
-
-/**
- * @brief 加法函数
- */
-int add(int a, int b)
-{
-    return a + b;
-}
-
-/**
- * @brief 减法函数
- */
-int sub(int a, int b)
-{
-    return a - b;
-}
-
-/**
- * @brief 乘法函数
- */
-int mul(int a, int b)
-{
-    return a * b;
-}
-
-/**
- * @brief 安全除法函数（除数为零时返回0）
- */
-int div_safe(int a, int b)
-{
-    if (b == 0) {
-        return 0;
-    }
-    return a / b;
-}
-
-/**
- * @brief 打印消息函数
- */
-void print_message(const char* msg)
-{
-    if (msg != NULL) {
-        printf("Message: %s\n", msg);
-    }
-}
-
-/*============================================================================
  * Global function pointers
  *===========================================================================*/
 
@@ -314,58 +265,6 @@ int test_func_ptr_in_condition(int a, int b, int (*op1)(int, int), int (*op2)(in
     } else {
         return 0;
     }
-}
-
-/*============================================================================
- * Stub dependency functions
- * 以下函数被下方被测函数直接调用（非函数指针），其返回值或出参决定分支走向。
- * 默认实现返回"正常"结果；测试时须通过 INSTALL_STUB 替换才能覆盖错误路径。
- *===========================================================================*/
-
-/*============================================================================
- * Stub dependency functions (regular C functions, not function pointers)
- * 以下函数为普通 C 函数，测试时通过 INSTALL_STUB 在运行时改写跳转地址实现打桩。
- *===========================================================================*/
-
-/** 返回单个整型状态码，默认 0。 */
-int dep_query_int(void)
-{
-    return 0;
-}
-
-/** 通过出参填充缓冲区，返回状态码，默认成功(0)。 */
-int dep_fill_buf(const char* key, char* buf, size_t buf_size)
-{
-    if (key == NULL || buf == NULL || buf_size == 0) {
-        return -1;
-    }
-    buf[0] = '\0';
-    return 0;
-}
-
-/** 返回传感器 A 的整型读数，默认 0。 */
-int dep_read_sensor_a(void)
-{
-    return 0;
-}
-
-/** 返回传感器 B 的整型读数，默认 0。 */
-int dep_read_sensor_b(void)
-{
-    return 0;
-}
-
-/** 获取资源锁，默认成功(0)。 */
-int dep_acquire(const char* name)
-{
-    (void)name;
-    return 0;
-}
-
-/** 释放资源锁（无操作）。 */
-void dep_release(const char* name)
-{
-    (void)name;
 }
 
 /*============================================================================

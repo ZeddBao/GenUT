@@ -17,6 +17,7 @@ set(SOURCES
     src/basic_functions.c
     src/control_flow.c
     src/error_handling.c
+    src/dep_helpers.c
     src/stub_dependency.c
     src/memory_management.c
     src/nested_struct_test.c
@@ -28,6 +29,7 @@ set(HEADERS
     include/basic_functions.h
     include/control_flow.h
     include/error_handling.h
+    include/dep_helpers.h
     include/stub_dependency.h
     include/memory_management.h
     include/nested_struct_test.h
@@ -58,8 +60,8 @@ FetchContent_MakeAvailable(googletest)
 
 # --- Test Executables ---
 # Find all test source files
-file(GLOB TEST_SOURCES "test/*.cpp")
-file(GLOB TEST_HEADERS "test/*.h")
+file(GLOB TEST_SOURCES "tests/*.cpp")
+file(GLOB TEST_HEADERS "tests/*.h")
 
 # Create test executables
 foreach(test_source ${TEST_SOURCES})
@@ -71,7 +73,7 @@ foreach(test_source ${TEST_SOURCES})
   endif()
 
   # Include the matching _stub.cpp file if it exists
-  set(stub_source "${CMAKE_SOURCE_DIR}/test/${test_name}_stub.cpp")
+  set(stub_source "${CMAKE_SOURCE_DIR}/tests/${test_name}_stub.cpp")
   if(EXISTS ${stub_source})
     set(test_extra_sources ${stub_source})
   else()

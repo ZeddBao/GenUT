@@ -11,22 +11,12 @@
 #ifndef STUB_DEPENDENCY_H
 #define STUB_DEPENDENCY_H
 
-#include <stddef.h>
 #include <stdint.h>
+#include "dep_helpers.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-/*============================================================================
- * Basic functions
- *===========================================================================*/
-
-int add(int a, int b);
-int sub(int a, int b);
-int mul(int a, int b);
-int div_safe(int a, int b);
-void print_message(const char* msg);
 
 /*============================================================================
  * Global function pointers
@@ -74,37 +64,6 @@ int test_returned_func_ptr(char op, int x, int y);
 int test_mixed_func_ptr_sources(int a, int b, char op_char, MathOperation* math_op);
 int test_nested_func_ptr_calls(int a, int b);
 int test_func_ptr_in_condition(int a, int b, int (*op1)(int, int), int (*op2)(int, int));
-
-/*============================================================================
- * Stub dependency functions (direct calls, not function pointers)
- * 以下函数被下方被测函数直接调用，其返回值或出参决定分支走向。
- * 默认实现永远返回固定值，测试时必须通过 INSTALL_STUB（改写跳转地址）
- * 才能覆盖全部分支路径。
- *===========================================================================*/
-
-/** 返回单个整型状态码，默认 0。用于测试：单依赖返回值分支。 */
-int dep_query_int(void);
-
-/**
- * 通过出参填充缓冲区，返回状态码，默认成功(0)。
- * 用于测试：出参驱动分支。
- */
-int dep_fill_buf(const char* key, char* buf, size_t buf_size);
-
-/** 返回传感器 A 的整型读数，默认 0。用于测试：双依赖联合分支。 */
-int dep_read_sensor_a(void);
-
-/** 返回传感器 B 的整型读数，默认 0。用于测试：双依赖联合分支。 */
-int dep_read_sensor_b(void);
-
-/**
- * 获取资源锁，返回状态码，默认成功(0)。
- * 用于测试：配对调用（acquire/release）分支。
- */
-int dep_acquire(const char* name);
-
-/** 释放资源锁，无返回值。配合 dep_acquire 使用。 */
-void dep_release(const char* name);
 
 /*============================================================================
  * Functions under test: branches driven by direct call results
