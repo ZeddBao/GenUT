@@ -878,7 +878,11 @@ class ConstraintExtractor:
             tok_start = token.extent.start.offset
             if left_end <= tok_start < right_start:
                 if token.spelling in ('||', '&&'):
-                    return None  # Logical operator — not a direct field comparison
+                    # Compound condition: try each sub-expression for a field access
+                    result = self._extract_field_access_from_ast(left, param_name)
+                    if result:
+                        return result
+                    return self._extract_field_access_from_ast(right, param_name)
                 if token.spelling in ('>', '>=', '<', '<=', '==', '!='):
                     op_token = token.spelling
                     break
@@ -891,12 +895,19 @@ class ConstraintExtractor:
         # Try to find field access on left side
         field_access = self._find_field_access_chain(left, param_name)
         if field_access:
-            # Right side should be literal
+            # Right side should be literal.
+            # right.get_tokens() may be empty when the literal is a macro (e.g., NULL expands
+            # to (void*)0 in the AST, but the source token is the macro name).  Fall back to
+            # scanning the full expression's tokens from the right-child source offset.
             literal_tokens = [t.spelling for t in right.get_tokens() if t.spelling not in ('(', ')')]
+            if not literal_tokens:
+                right_off = right.extent.start.offset
+                literal_tokens = [
+                    t.spelling for t in cond_node.get_tokens()
+                    if t.extent.start.offset >= right_off and t.spelling not in ('(', ')')
+                ]
             if literal_tokens:
                 literal = ' '.join(literal_tokens)
-                # Debug
-                # print(f"[DEBUG] _extract_field_access_from_ast found: param={param_name}, field_access={field_access}, op={op_token}, literal={literal}")
                 return (field_access, op_token, literal)
 
         # Try field access on right side
@@ -904,6 +915,13 @@ class ConstraintExtractor:
         if field_access:
             # Left side should be literal
             literal_tokens = [t.spelling for t in left.get_tokens() if t.spelling not in ('(', ')')]
+            if not literal_tokens:
+                left_off = left.extent.start.offset
+                left_end_off = left.extent.end.offset
+                literal_tokens = [
+                    t.spelling for t in cond_node.get_tokens()
+                    if left_off <= t.extent.start.offset < left_end_off and t.spelling not in ('(', ')')
+                ]
             if literal_tokens:
                 literal = ' '.join(literal_tokens)
                 # Reverse operator for right-side field access

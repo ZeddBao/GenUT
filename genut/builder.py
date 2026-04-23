@@ -15,7 +15,7 @@ class GTestBuilder:
         r'(?<![A-Za-z_0-9])-?(?:0[xX][0-9a-fA-F]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)[fFlLuU]*'
     )
     # C++ keywords that are valid in generated code and must not be flagged as "local variables"
-    _CPP_KEYWORDS = frozenset({'true', 'false', 'nullptr', 'NULL'})
+    _CPP_KEYWORDS = frozenset({'true', 'false', 'nullptr', 'NULL', 'void'})
 
     def __init__(self, source_file, funcs_info, known_constants,
                  config: GeneratorConfig, outdir=None, project_includes=None, construct=False,
@@ -28,6 +28,9 @@ class GTestBuilder:
         self.config = config
         self.stub_framework = stub_framework  # StubFrameworkBase instance or None
         self.stub_builder = stub_builder      # StubBuilder instance or None
+        # Function pointer helpers: func_ptr_type_str → (helper_name, definition)
+        self._func_ptr_helpers = {}
+        self._func_ptr_helper_counter = 0
 
         # Resolve output paths using naming configuration
         self._resolve_output_paths(outdir)
@@ -168,11 +171,21 @@ class GTestBuilder:
 
     def build_cpp(self):
         """Build the C++ test file."""
-        code = self._build_cpp_header()
+        # First pass: generate test cases (this populates self._func_ptr_helpers)
+        test_cases = []
         for func in self.funcs_info:
-            code.append(f"// Function '{func.name}': cyclomatic complexity = {func.complexity}, test paths generated = {len(func.paths)}")
+            test_cases.append(f"// Function '{func.name}': cyclomatic complexity = {func.complexity}, test paths generated = {len(func.paths)}")
             for i, path in enumerate(func.paths, 1):
-                code.extend(self._build_test_case(func, path, i))
+                test_cases.extend(self._build_test_case(func, path, i))
+
+        # Second pass: assemble output — helpers (if any) go before test cases
+        code = self._build_cpp_header()
+        if self._func_ptr_helpers:
+            code.append("// --- Function Pointer Stubs for non-NULL paths ---")
+            for _, (_, defn) in self._func_ptr_helpers.items():
+                code.append(defn)
+            code.append("")
+        code.extend(test_cases)
         return "\n".join(code)
 
     def _build_cpp_header(self):
@@ -360,8 +373,7 @@ class GTestBuilder:
                         type_str = fval.get('__type__', "")
                         is_fptr = '(*)' in type_str or ')(*' in type_str
                         if is_fptr:
-                            code.append(f"{space}// TODO: {field} is a function pointer; assign a valid function to cover the non-NULL path")
-                            scalar_str = "NULL"
+                            scalar_str = self._get_or_create_fp_helper(type_str)
                         else:
                             # (void*)1 is always a non-NULL placeholder from the extractor;
                             # construct a backing local variable for the pointed-to type
@@ -504,8 +516,7 @@ class GTestBuilder:
                         scalar = self._clean_scalar_value(val)
                         if scalar == "(void*)1":
                             if is_func_ptr:
-                                code.append(f"    // TODO: assign a valid function pointer to {g_name} to cover the non-NULL path")
-                                scalar = "NULL"
+                                scalar = self._get_or_create_fp_helper(g_type)
                             elif "char" in canon_type:
                                 scalar = '""'
                         code.append(f"    {g_name} = {scalar};")
@@ -656,9 +667,7 @@ class GTestBuilder:
             # (void*)1 is a non-NULL placeholder — construct a real stack variable instead
             if scalar == "(void*)1":
                 if is_func_ptr:
-                    # Cannot auto-construct a function; needs a real compatible function
-                    code.append(f"    // TODO: assign a valid function pointer to {pname} to cover the non-NULL path")
-                    scalar = "NULL"
+                    scalar = self._get_or_create_fp_helper(ptype)
                 else:
                     base_type = ptype.replace('*', '').replace('const', '').strip()
                     local = f"{pname}_val"
@@ -861,6 +870,51 @@ class GTestBuilder:
         if type_str_stripped.endswith('*'):
             return f"{type_str_stripped}{name}"
         return f"{type_str_stripped} {name}"
+
+    def _parse_func_ptr_type(self, func_ptr_type):
+        """Parse 'int (*)(int, int)' → (ret_type, [param_type_str, ...]).
+        Returns (None, None) on failure.
+        """
+        t = func_ptr_type.strip()
+        m = re.match(r'^(.*?)\(\s*\*\s*\)\s*\((.*)\)$', t, re.DOTALL)
+        if not m:
+            return None, None
+        ret_type = m.group(1).strip()
+        params_str = m.group(2).strip()
+        if not params_str or params_str == 'void':
+            return ret_type, []
+        return ret_type, [p.strip() for p in params_str.split(',')]
+
+    def _make_fp_helper_defn(self, helper_name, ret_type, param_types):
+        """Return a static C++ function definition for use as a non-NULL function pointer value."""
+        if param_types:
+            params = [f"{pt} arg{i}" for i, pt in enumerate(param_types)]
+            params_str = ", ".join(params)
+            void_stmts = " ".join(f"(void)arg{i};" for i in range(len(param_types)))
+        else:
+            params_str = "void"
+            void_stmts = ""
+        if ret_type == "void":
+            body = f"{{ {void_stmts} }}" if void_stmts else "{ }"
+        else:
+            default_ret = self._default_value(ret_type)
+            body = f"{{ {void_stmts} return {default_ret}; }}" if void_stmts else f"{{ return {default_ret}; }}"
+        return f"static {ret_type} {helper_name}({params_str}) {body}"
+
+    def _get_or_create_fp_helper(self, func_ptr_type):
+        """Return the name of a static helper function for the given function pointer type,
+        creating it on first use. Falls back to NULL if the type cannot be parsed.
+        """
+        if func_ptr_type in self._func_ptr_helpers:
+            return self._func_ptr_helpers[func_ptr_type][0]
+        ret_type, param_types = self._parse_func_ptr_type(func_ptr_type)
+        if ret_type is None:
+            return "NULL"
+        helper_name = f"_fp_stub_{self._func_ptr_helper_counter}"
+        self._func_ptr_helper_counter += 1
+        defn = self._make_fp_helper_defn(helper_name, ret_type, param_types)
+        self._func_ptr_helpers[func_ptr_type] = (helper_name, defn)
+        return helper_name
 
     def _default_value(self, canon_type_str):
         """Get default value for a type using configuration."""

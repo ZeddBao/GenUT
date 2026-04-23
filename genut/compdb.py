@@ -139,6 +139,16 @@ class CompDbParser:
         except clang.CompilationDatabaseError:
             pass
 
+        # Remove the end-of-options '--' marker and everything after it.
+        # Some build systems (e.g., Clang's CMake integration on Windows) embed '--'
+        # before implicit system include paths. libclang treats every argument after
+        # '--' as a linker input rather than a compiler flag, which silently drops
+        # any '-I' paths appended later and causes type resolution failures.
+        # System includes after '--' are redundant because _get_system_includes()
+        # already discovers them via the local compiler.
+        if '--' in args:
+            args = args[:args.index('--')]
+
         args.extend(self._get_system_includes())
         # Expand response files
         args = self._expand_response_files(args)
