@@ -1,5 +1,8 @@
 ---
+name: genut
 description: Generate GTest unit tests for a C source file. Use when the user says "generate tests", "生成ut", "生成单元测试", or provides a .c file path and asks for tests.
+arguments: [source_file, project_root, outdir, functions]
+user-invocable: true
 allowed-tools: Glob, Read, Edit, mcp__genut__generate_tests
 ---
 
