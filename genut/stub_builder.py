@@ -15,6 +15,41 @@ class StubBuilder:
         out_base = f"{naming.file_prefix}{base_name}{naming.file_suffix}"
         self.out_base_name = out_base
         self.out_stub_cpp_path = os.path.join(out_dir, f"{out_base}_stub.cpp")
+        # Function pointer helpers registered by GTestBuilder during build_cpp()
+        # Each entry: (helper_name, ret_type, param_types)
+        self._fp_helpers = []
+
+    def add_fp_helper(self, helper_name, ret_type, param_types):
+        """Register a function pointer stub helper (called by GTestBuilder)."""
+        self._fp_helpers.append((helper_name, ret_type, param_types))
+
+    def _make_fp_helper_defn(self, helper_name, ret_type, param_types):
+        """Return a non-static C++ function definition for a function pointer stub."""
+        if param_types:
+            params = [f"{pt} arg{i}" for i, pt in enumerate(param_types)]
+            params_str = ", ".join(params)
+            void_stmts = "\n    ".join(f"(void)arg{i};" for i in range(len(param_types)))
+        else:
+            params_str = "void"
+            void_stmts = ""
+        ret_stripped = ret_type.rstrip()
+        sep = "" if ret_stripped.endswith("*") else " "
+        if ret_type == "void":
+            body_lines = [f"    {void_stmts}"] if void_stmts else []
+        else:
+            # Mirror GTestBuilder._default_value logic for common types
+            if "int" in ret_type or "long" in ret_type or "short" in ret_type or "char" in ret_type:
+                default_ret = "0"
+            elif "float" in ret_type or "double" in ret_type:
+                default_ret = "0.0"
+            elif ret_type.strip().endswith("*"):
+                default_ret = "nullptr"
+            else:
+                default_ret = "0"
+            body_lines = ([f"    {void_stmts}"] if void_stmts else []) + [f"    return {default_ret};"]
+        sig = f"{ret_stripped}{sep}{helper_name}({params_str})"
+        lines = [f"{sig} {{"] + body_lines + ["}"]
+        return "\n".join(lines)
 
     def _build_copyright_header(self):
         """Build copyright header lines if configured."""
@@ -126,6 +161,12 @@ class StubBuilder:
                 lines.append(f"#include {inc}")
         lines.append("")
 
+        if self._fp_helpers:
+            lines.append("// --- Function Pointer Stubs for non-NULL paths ---")
+            for helper_name, ret_type, param_types in self._fp_helpers:
+                lines.append(self._make_fp_helper_defn(helper_name, ret_type, param_types))
+                lines.append("")
+
         seen = set()
         for func, i, sc in self._iter_stubs():
             name = self.stub_func_name(sc.callee_name, func.name, i, sc.is_function_pointer)
@@ -199,5 +240,5 @@ class StubBuilder:
         return "\n".join(lines)
 
     def has_stubs(self):
-        """Return True if any function path has stub constraints."""
-        return any(True for _ in self._iter_stubs())
+        """Return True if there are any stubs or fp helpers to write."""
+        return bool(self._fp_helpers) or any(True for _ in self._iter_stubs())

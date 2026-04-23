@@ -28,7 +28,7 @@ class GTestBuilder:
         self.config = config
         self.stub_framework = stub_framework  # StubFrameworkBase instance or None
         self.stub_builder = stub_builder      # StubBuilder instance or None
-        # Function pointer helpers: func_ptr_type_str → (helper_name, definition)
+        # Function pointer helpers: func_ptr_type_str → (helper_name, ret_type, param_types)
         self._func_ptr_helpers = {}
         self._func_ptr_helper_counter = 0
 
@@ -181,9 +181,19 @@ class GTestBuilder:
         # Second pass: assemble output — helpers (if any) go before test cases
         code = self._build_cpp_header()
         if self._func_ptr_helpers:
-            code.append("// --- Function Pointer Stubs for non-NULL paths ---")
-            for _, (_, defn) in self._func_ptr_helpers.items():
-                code.append(defn)
+            if self.stub_builder is not None:
+                # Definitions are in _stub.cpp; only emit forward declarations here
+                code.append("// --- Function Pointer Stub Declarations (defined in _stub.cpp) ---")
+                for _, (helper_name, ret_type, param_types) in self._func_ptr_helpers.items():
+                    params_str = ", ".join(f"{pt} arg{i}" for i, pt in enumerate(param_types)) if param_types else "void"
+                    ret_stripped = ret_type.rstrip()
+                    sep = "" if ret_stripped.endswith("*") else " "
+                    code.append(f"{ret_stripped}{sep}{helper_name}({params_str});")
+            else:
+                # No stub file — keep static definitions inline
+                code.append("// --- Function Pointer Stubs for non-NULL paths ---")
+                for _, (helper_name, ret_type, param_types) in self._func_ptr_helpers.items():
+                    code.append(self._make_fp_helper_defn(helper_name, ret_type, param_types, static=True))
             code.append("")
         code.extend(test_cases)
         return "\n".join(code)
@@ -885,8 +895,8 @@ class GTestBuilder:
             return ret_type, []
         return ret_type, [p.strip() for p in params_str.split(',')]
 
-    def _make_fp_helper_defn(self, helper_name, ret_type, param_types):
-        """Return a static C++ function definition for use as a non-NULL function pointer value."""
+    def _make_fp_helper_defn(self, helper_name, ret_type, param_types, static=True):
+        """Return a C++ function definition for use as a non-NULL function pointer value."""
         if param_types:
             params = [f"{pt} arg{i}" for i, pt in enumerate(param_types)]
             params_str = ", ".join(params)
@@ -899,7 +909,8 @@ class GTestBuilder:
         else:
             default_ret = self._default_value(ret_type)
             body = f"{{ {void_stmts} return {default_ret}; }}" if void_stmts else f"{{ return {default_ret}; }}"
-        return f"static {ret_type} {helper_name}({params_str}) {body}"
+        prefix = "static " if static else ""
+        return f"{prefix}{ret_type} {helper_name}({params_str}) {body}"
 
     def _get_or_create_fp_helper(self, func_ptr_type):
         """Return the name of a static helper function for the given function pointer type,
@@ -912,8 +923,9 @@ class GTestBuilder:
             return "NULL"
         helper_name = f"_fp_stub_{self._func_ptr_helper_counter}"
         self._func_ptr_helper_counter += 1
-        defn = self._make_fp_helper_defn(helper_name, ret_type, param_types)
-        self._func_ptr_helpers[func_ptr_type] = (helper_name, defn)
+        self._func_ptr_helpers[func_ptr_type] = (helper_name, ret_type, param_types)
+        if self.stub_builder is not None:
+            self.stub_builder.add_fp_helper(helper_name, ret_type, param_types)
         return helper_name
 
     def _default_value(self, canon_type_str):
