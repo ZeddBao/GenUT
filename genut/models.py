@@ -1,5 +1,33 @@
 """Data models for UT generation."""
 
+
+class _NonNullSentinel:
+    """Sentinel meaning 'a non-NULL pointer value is required here'.
+
+    Flows from ConstraintExtractor (where the pointer != NULL condition is
+    resolved) through PathConstraint.param_values / StubConstraint.return_value
+    into GTestBuilder / StubBuilder.  Consumers detect it with ``is NON_NULL``
+    (identity check) so there is zero risk of collision with any real source
+    value.
+    """
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self):
+        return "NON_NULL"
+
+    def __str__(self):
+        return "NON_NULL"
+
+
+# Singleton sentinel — use ``is NON_NULL`` to test, never ``== "(void*)1"``
+NON_NULL = _NonNullSentinel()
+
+
 # Function pointer source types
 FUNC_PTR_SOURCE_GLOBAL = "global"      # Global variable
 FUNC_PTR_SOURCE_PARAM = "param"        # Function parameter
@@ -10,7 +38,8 @@ FUNC_PTR_SOURCE_LOCAL = "local"        # Local variable
 class StubConstraint:
     """Describes a stub needed for one test path: which function to replace and what it should return."""
     def __init__(self, callee_name, return_value, ret_type, params, output_params=None,
-                 is_function_pointer=False, pointer_var_name=None, pointer_source_type=None):
+                 is_function_pointer=False, pointer_var_name=None, pointer_source_type=None,
+                 array_index=None):
         self.callee_name = callee_name    # name of the function to stub
         self.return_value = return_value  # value the stub must return (str) - for non-void functions
         self.ret_type = ret_type          # return type of the callee
@@ -21,6 +50,7 @@ class StubConstraint:
         self.is_function_pointer = is_function_pointer  # True if this is a function pointer stub
         self.pointer_var_name = pointer_var_name        # Name of the function pointer variable
         self.pointer_source_type = pointer_source_type  # Source type: global, param, return, field, local
+        self.array_index = array_index    # Element index string when FP is inside an array (e.g. '2')
 
 
 class PathConstraint:

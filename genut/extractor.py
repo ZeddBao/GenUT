@@ -5,7 +5,7 @@ import re
 import clang.cindex as clang
 
 from .models import (
-    PathConstraint, StubConstraint,
+    PathConstraint, StubConstraint, NON_NULL,
     FUNC_PTR_SOURCE_GLOBAL, FUNC_PTR_SOURCE_PARAM, FUNC_PTR_SOURCE_RETURN,
     FUNC_PTR_SOURCE_FIELD, FUNC_PTR_SOURCE_LOCAL
 )
@@ -28,6 +28,7 @@ class ConstraintExtractor:
         # Maps local var name -> callee info for vars initialized from a CALL_EXPR
         self.call_var_map = {}
         self._find_call_vars()
+        self._find_call_assigned_vars()  # also track vars assigned (not just initialized) from calls
         # Maps local var name -> callee info for vars modified via pointer parameters in a CALL_EXPR
         self.call_modified_var_map = {}
         self._find_call_modified_vars()
@@ -89,6 +90,48 @@ class ConstraintExtractor:
             if var_name in self.param_names or var_name in self.global_vars:
                 continue
             call_expr = self._find_call_expr(node)
+            if call_expr is None:
+                continue
+            callee_info = self._extract_callee_info(call_expr)
+            if callee_info and callee_info.get('ret_type', 'void') != 'void':
+                self.call_var_map[var_name] = callee_info
+
+    def _find_call_assigned_vars(self):
+        """Find local variables assigned (not just initialized) from CALL_EXPR nodes.
+
+        Handles patterns like:
+            int result = 0;
+            if (fp != NULL) { result = fp(a, b); }   ← assignment, not initializer
+        Adds entries to call_var_map so _apply_condition can generate stub constraints.
+        """
+        for node in self.func_node.walk_preorder():
+            if node.kind != clang.CursorKind.BINARY_OPERATOR:
+                continue
+            children = list(node.get_children())
+            if len(children) != 2:
+                continue
+            left, right = children
+            # Verify operator is plain '=' (not '==', '+=', etc.)
+            left_end = left.extent.end.offset
+            right_start = right.extent.start.offset
+            op_tok = None
+            for tok in node.get_tokens():
+                ts = tok.extent.start.offset
+                if left_end <= ts < right_start:
+                    op_tok = tok.spelling
+                    break
+            if op_tok != '=':
+                continue
+            # LHS must be a simple local variable (not a param or global)
+            if left.kind != clang.CursorKind.DECL_REF_EXPR:
+                continue
+            var_name = left.spelling
+            if var_name in self.param_names or var_name in self.global_vars:
+                continue
+            if var_name in self.call_var_map:
+                continue  # Already tracked via initializer; initializer takes priority
+            # RHS must contain a non-void CALL_EXPR
+            call_expr = right if right.kind == clang.CursorKind.CALL_EXPR else self._find_call_expr(right)
             if call_expr is None:
                 continue
             callee_info = self._extract_callee_info(call_expr)
@@ -397,9 +440,12 @@ class ConstraintExtractor:
                 # Recursively extract from the array expression
                 result = self._extract_callee_info_from_expr(array_expr, call_expr)
                 if result:
-                    # The result is for the array itself, but we need to note it's an array element
                     result['is_array_element'] = True
                     result['array_subscript'] = True
+                    # Capture the subscript index (e.g., '2' from global_op_array[2])
+                    if len(children) >= 2:
+                        idx_toks = [t.spelling for t in children[1].get_tokens()]
+                        result['array_index'] = ''.join(idx_toks) if idx_toks else None
                 return result
 
         # UNEXPOSED_EXPR - recursively check children
@@ -443,74 +489,56 @@ class ConstraintExtractor:
             paths.append(PathConstraint(expected_return=ret_val))
         return paths
 
+    def _visit_seq(self, children, ctx, paths, stub_ctx, parent_node=None):
+        """Process a sequence of sibling AST nodes, handling implicit-else chaining."""
+        i = 0
+        while i < len(children):
+            child = children[i]
+            k = child.kind
+            if k == clang.CursorKind.SWITCH_STMT:
+                self._handle_switch(child, ctx, paths, stub_ctx, parent_body=parent_node)
+                i += 1
+            elif k == clang.CursorKind.IF_STMT:
+                neg_ctx, neg_stub = self._handle_if(child, ctx, paths, stub_ctx)
+                has_implicit_else = any(p.description == "else (implicit)" for p in paths)
+                if has_implicit_else:
+                    remaining = children[i+1:]
+                    if remaining:
+                        implicit_paths = []
+                        # Recurse into _visit_seq so that nested early-exit ifs also
+                        # chain their implicit-else into the remaining siblings correctly.
+                        self._visit_seq(remaining, neg_ctx, implicit_paths, neg_stub,
+                                        parent_node=parent_node)
+                        trailing_ret = None
+                        for sib in reversed(remaining):
+                            if sib.kind == clang.CursorKind.RETURN_STMT:
+                                trailing_ret = self._get_return_value(sib)
+                                break
+                        if trailing_ret is not None:
+                            for p in implicit_paths:
+                                if p.description == "else (implicit)" and p.expected_return is None:
+                                    p.expected_return = trailing_ret
+                        if implicit_paths:
+                            for idx, p in enumerate(paths):
+                                if p.description == "else (implicit)":
+                                    del paths[idx]
+                                    paths.extend(implicit_paths)
+                                    break
+                    i += len(remaining)
+                i += 1
+            else:
+                self._visit(child, ctx, paths, stub_ctx)
+                i += 1
+
     def _visit(self, node, ctx, paths, stub_ctx):
-        # When called directly on a control-flow statement, dispatch immediately
-        # (happens when the implicit-else handler passes a sibling IF/SWITCH node)
         if node.kind == clang.CursorKind.IF_STMT:
             self._handle_if(node, ctx, paths, stub_ctx)
             return
         if node.kind == clang.CursorKind.SWITCH_STMT:
             self._handle_switch(node, ctx, paths, stub_ctx)
             return
-
         children = list(node.get_children())
-        i = 0
-        while i < len(children):
-            child = children[i]
-            k = child.kind
-            if k == clang.CursorKind.SWITCH_STMT:
-                self._handle_switch(child, ctx, paths, stub_ctx, parent_body=node)
-                i += 1
-            elif k == clang.CursorKind.IF_STMT:
-                # 处理if语句，获取否定上下文
-                neg_ctx, neg_stub = self._handle_if(child, ctx, paths, stub_ctx)
-                # 检查是否有隐式else路径
-                has_implicit_else = False
-                for path in paths:
-                    if path.description == "else (implicit)":
-                        has_implicit_else = True
-                        break
-                if has_implicit_else:
-                    # 隐式else路径已添加，但需要为后续的兄弟节点生成路径
-                    # 收集后续的兄弟节点
-                    remaining_children = children[i+1:]
-                    if remaining_children:
-                        # 为隐式else分支创建新的路径列表
-                        implicit_paths = []
-                        # 处理后续兄弟节点，使用否定上下文
-                        for sibling in remaining_children:
-                            self._visit(sibling, neg_ctx, implicit_paths, neg_stub)
-                        # If any "else (implicit)" paths have no return value, look for a
-                        # trailing RETURN_STMT in the siblings (the fallthrough case).
-                        trailing_ret = None
-                        for sibling in reversed(remaining_children):
-                            if sibling.kind == clang.CursorKind.RETURN_STMT:
-                                trailing_ret = self._get_return_value(sibling)
-                                break
-                        if trailing_ret is not None:
-                            for p in implicit_paths:
-                                if p.description == "else (implicit)" and p.expected_return is None:
-                                    p.expected_return = trailing_ret
-                        # 将隐式路径合并到主路径中
-                        if implicit_paths:
-                            # 找到并更新隐式else路径
-                            for path_idx, path in enumerate(paths):
-                                if path.description == "else (implicit)":
-                                    # 替换隐式else路径为实际生成的路径
-                                    # 实际上，我们需要将隐式路径合并
-                                    # 简单起见，删除隐式else路径，添加实际路径
-                                    del paths[path_idx]
-                                    paths.extend(implicit_paths)
-                                    break
-                        else:
-                            # 没有生成路径，保留隐式else路径
-                            pass
-                    # Skip the remaining siblings already processed in the implicit-else context
-                    i += len(remaining_children)
-                i += 1
-            else:
-                self._visit(child, ctx, paths, stub_ctx)
-                i += 1
+        self._visit_seq(children, ctx, paths, stub_ctx, parent_node=node)
 
     def _get_case_int_value(self, case_value_node):
         """Get the integer value of a switch case expression, including enum constants."""
@@ -697,6 +725,21 @@ class ConstraintExtractor:
                     if val_str is not None:
                         new_paths[-1].expected_return = val_str
 
+    def _body_has_early_exit(self, body_node):
+        """Return True if the body has a direct (top-level) return/break/continue."""
+        if body_node is None:
+            return False
+        if body_node.kind in (clang.CursorKind.RETURN_STMT,
+                               clang.CursorKind.BREAK_STMT,
+                               clang.CursorKind.CONTINUE_STMT):
+            return True
+        for child in body_node.get_children():
+            if child.kind in (clang.CursorKind.RETURN_STMT,
+                               clang.CursorKind.BREAK_STMT,
+                               clang.CursorKind.CONTINUE_STMT):
+                return True
+        return False
+
     def _handle_if(self, if_node, ctx, paths, stub_ctx):
         chain = []
         else_body = None
@@ -742,11 +785,16 @@ class ConstraintExtractor:
                                                   stub_constraints=self._build_stub_constraints(neg_stub)))
             paths.extend(else_paths)
         else:
-            # 隐式else分支：所有条件都为假
-            # 生成一个路径，但期望返回值为None，表示需要继续执行后续代码
-            # 实际的后序代码将由调用者处理
-            paths.append(PathConstraint(neg_ctx, "else (implicit)", expected_return=None,
-                                         stub_constraints=self._build_stub_constraints(neg_stub)))
+            # For a standalone if (no else-if chain), skip implicit-else when the body
+            # falls through — the true path already covers the remaining code.
+            # For if-else-if chains (len > 1), always generate implicit-else because
+            # each branch is exclusive and the "all false" path needs coverage.
+            last_body = chain[-1][1]
+            if len(chain) == 1 and not self._body_has_early_exit(last_body):
+                pass  # fall-through: no implicit-else needed
+            else:
+                paths.append(PathConstraint(neg_ctx, "else (implicit)", expected_return=None,
+                                             stub_constraints=self._build_stub_constraints(neg_stub)))
         # 返回否定上下文，用于处理隐式else分支的后续代码
         return neg_ctx, neg_stub
 
@@ -766,7 +814,8 @@ class ConstraintExtractor:
                     params=info['params'],
                     is_function_pointer=info.get('is_function_pointer', False),
                     pointer_var_name=info.get('pointer_var_name'),
-                    pointer_source_type=info.get('pointer_source_type')
+                    pointer_source_type=info.get('pointer_source_type'),
+                    array_index=info.get('array_index'),
                 )
         # Process output parameter constraints
         outparam_by_callee = {}
@@ -1264,6 +1313,8 @@ class ConstraintExtractor:
             for m in re.finditer(rf'{_LIT}\s*(>|>=|<|<=|==|!=)\s*\b{re.escape(param)}\b', token_str):
                 if m.group(1) in self.trackable_vars:
                     continue
+                if m.group(1) in local_call_vars:
+                    continue
                 prefix = token_str[:m.start(1)].rstrip()
                 if prefix.endswith('.') or prefix.endswith('->'):
                     continue
@@ -1303,8 +1354,18 @@ class ConstraintExtractor:
             existing = new_stub.get(var_name)
             hint = existing if not isinstance(existing, dict) else None
             m = re.search(rf'\b{re.escape(var_name)}\s*(>|>=|<|<=|==|!=)\s*{_LIT}', token_str)
-            if m and m.group(2) not in local_results:
-                new_stub[var_name] = self._solve(m.group(1), m.group(2), negate, hint)
+            if m:
+                if m.group(2) not in local_results:
+                    new_stub[var_name] = self._solve(m.group(1), m.group(2), negate, hint)
+                    # If RHS is a function parameter, pin it to 0 (the value assumed by _solve)
+                    # so the generated test uses a consistent value instead of an arbitrary fallback.
+                    if m.group(2) in param_vars and m.group(2) not in new_ctx:
+                        new_ctx[m.group(2)] = '0'
+                else:
+                    # Both operands are call-result locals (e.g., result1 > result2).
+                    # Treat the right operand as 0 (its default when the FP is NULL),
+                    # so the left operand gets a concrete satisfying value.
+                    new_stub[var_name] = self._solve(m.group(1), '0', negate, hint)
                 continue
             m = re.search(rf'{_LIT}\s*(>|>=|<|<=|==|!=)\s*\b{re.escape(var_name)}\b', token_str)
             if m and m.group(1) not in local_results:
@@ -1312,6 +1373,11 @@ class ConstraintExtractor:
                 if not (prefix.endswith('.') or prefix.endswith('->')):
                     rev = self._OP_REVERSE.get(m.group(2), m.group(2))
                     new_stub[var_name] = self._solve(rev, m.group(1), negate, hint)
+                    # If LHS is a function parameter, pin it to 0 (the value assumed by _solve)
+                    if m.group(1) in param_vars and m.group(1) not in new_ctx:
+                        new_ctx[m.group(1)] = '0'
+            # If m.group(1) is in local_results (other operand is also a call-result local):
+            # skip — var_name will be constrained when its counterpart is the left operand.
 
         # Handle output parameter variables -> stub constraints
         for var_name, info in self.call_modified_var_map.items():
@@ -1382,9 +1448,9 @@ class ConstraintExtractor:
             lit = literal.strip()
             if lit == "NULL":
                 if op == '!=':
-                    return "(void*)1" if not negate else "NULL"
+                    return NON_NULL if not negate else "NULL"
                 else:
-                    return "NULL" if not negate else "(void*)1"
+                    return "NULL" if not negate else NON_NULL
             # Char literals: 'A', '\n', etc. — try to offset the value for negation
             elif re.match(r"^'[^']*'$", lit):
                 if not negate:

@@ -2,6 +2,8 @@
 
 import os
 
+from .models import NON_NULL
+
 
 class StubBuilder:
     """Generates stub function declarations (for .h) and implementations (_stub.cpp)."""
@@ -80,8 +82,14 @@ class StubBuilder:
 
     def build_stub_declarations(self):
         """Return a list of declaration strings to embed in the .h file."""
-        seen = set()
         decls = []
+        # fp helper declarations (populated by GTestBuilder.build_cpp() first pass)
+        for helper_name, ret_type, param_types in self._fp_helpers:
+            params_str = ", ".join(f"{pt} arg{i}" for i, pt in enumerate(param_types)) if param_types else "void"
+            ret_stripped = ret_type.rstrip()
+            sep = "" if ret_stripped.endswith("*") else " "
+            decls.append(f"{ret_stripped}{sep}{helper_name}({params_str});")
+        seen = set()
         for func, i, sc in self._iter_stubs():
             name = self.stub_func_name(sc.callee_name, func.name, i, sc.is_function_pointer)
             if name in seen:
@@ -91,7 +99,6 @@ class StubBuilder:
                 param_str = ", ".join(self._format_param_type(p['type'], p['name']) for p in sc.params)
             else:
                 param_str = "void"
-            # Use _format_function_declaration for correct function pointer return type formatting
             decls.append(f"{self._format_function_declaration(sc.ret_type, name, param_str)};")
         return decls
 
@@ -208,21 +215,25 @@ class StubBuilder:
 
             # Return value
             if sc.ret_type != 'void' and sc.return_value:
-                # Clean up comment-like return values (e.g., "/* not NULL */")
-                return_value = sc.return_value.strip()
-                if return_value.startswith("/*") and return_value.endswith("*/"):
-                    # It's a comment, replace with NULL for function pointers
+                if sc.return_value is NON_NULL:
+                    # NON_NULL sentinel: a non-NULL function pointer is required but we have no
+                    # concrete callable — emit nullptr with a TODO so the user can fill it in.
                     if self._is_function_pointer_type(sc.ret_type):
-                        lines.append("    return NULL;")
+                        lines.append(f"    return nullptr;  // TODO: replace with a real non-NULL stub function of type {sc.ret_type}")
                     else:
-                        lines.append(f"    return {return_value};")  # keep as-is (might cause compilation error)
-                elif return_value == "(void*)1" and self._is_function_pointer_type(sc.ret_type):
-                    # (void*)1 is a non-NULL placeholder, but calling an invalid function pointer
-                    # causes a crash.  Return nullptr here and let the user replace this with a
-                    # real callable function of the matching type.
-                    lines.append(f"    return nullptr;  // TODO: replace with a real non-NULL stub function of type {sc.ret_type}")
+                        lines.append("    return /* TODO: non-NULL pointer required */;")
                 else:
-                    lines.append(f"    return {return_value};")
+                    # Clean up comment-like return values (e.g., "/* not NULL */")
+                    return_value = sc.return_value.strip()
+                    if return_value.startswith("/*") and return_value.endswith("*/"):
+                        if self._is_function_pointer_type(sc.ret_type):
+                            lines.append("    return nullptr;")
+                        else:
+                            lines.append(f"    return {return_value};")  # keep as-is (might cause compilation error)
+                    else:
+                        # Use nullptr instead of NULL in C++ stub files
+                        rv = "nullptr" if return_value == "NULL" else return_value
+                        lines.append(f"    return {rv};")
             elif sc.ret_type == 'void':
                 # void function, no return needed
                 pass
@@ -230,7 +241,7 @@ class StubBuilder:
                 # No return value specified
                 # Check if this is a function pointer type
                 if self._is_function_pointer_type(sc.ret_type):
-                    lines.append("    return NULL;")
+                    lines.append("    return nullptr;")
                 else:
                     lines.append("    return /* TODO */;")
 

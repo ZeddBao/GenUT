@@ -3,7 +3,7 @@
 import os
 import re
 
-from .models import PathConstraint, FunctionInfo
+from .models import PathConstraint, FunctionInfo, NON_NULL
 from .config import GeneratorConfig
 
 
@@ -178,22 +178,13 @@ class GTestBuilder:
             for i, path in enumerate(func.paths, 1):
                 test_cases.extend(self._build_test_case(func, path, i))
 
-        # Second pass: assemble output — helpers (if any) go before test cases
+        # Second pass: assemble output
         code = self._build_cpp_header()
-        if self._func_ptr_helpers:
-            if self.stub_builder is not None:
-                # Definitions are in _stub.cpp; only emit forward declarations here
-                code.append("// --- Function Pointer Stub Declarations (defined in _stub.cpp) ---")
-                for _, (helper_name, ret_type, param_types) in self._func_ptr_helpers.items():
-                    params_str = ", ".join(f"{pt} arg{i}" for i, pt in enumerate(param_types)) if param_types else "void"
-                    ret_stripped = ret_type.rstrip()
-                    sep = "" if ret_stripped.endswith("*") else " "
-                    code.append(f"{ret_stripped}{sep}{helper_name}({params_str});")
-            else:
-                # No stub file — keep static definitions inline
-                code.append("// --- Function Pointer Stubs for non-NULL paths ---")
-                for _, (helper_name, ret_type, param_types) in self._func_ptr_helpers.items():
-                    code.append(self._make_fp_helper_defn(helper_name, ret_type, param_types, static=True))
+        if self._func_ptr_helpers and self.stub_builder is None:
+            # No stub file — keep static definitions inline in the .cpp
+            code.append("// --- Function Pointer Stubs for non-NULL paths ---")
+            for _, (helper_name, ret_type, param_types) in self._func_ptr_helpers.items():
+                code.append(self._make_fp_helper_defn(helper_name, ret_type, param_types, static=True))
             code.append("")
         code.extend(test_cases)
         return "\n".join(code)
@@ -230,11 +221,16 @@ class GTestBuilder:
         code.append("    // Save original global variable values")
         for g_name, g_info in global_vars.items():
             g_type = g_info['type']
-            # Check if this is an array type (contains '[')
             is_array = '[' in g_type and ']' in g_type
             if is_array:
-                # Arrays cannot be assigned - generate comment instead
-                code.append(f"    // Note: Global array '{g_name}' cannot be saved/restored automatically")
+                if '(*[' in g_type:
+                    # Array of function pointers: embed saved_name into the typed declaration
+                    saved_name = f"saved_{g_name}"
+                    decl = g_type.replace('(*[', f'(*{saved_name}[')
+                    code.append(f"    {decl};")
+                    code.append(f"    memcpy({saved_name}, {g_name}, sizeof({g_name}));")
+                else:
+                    code.append(f"    // Note: Global array '{g_name}' cannot be saved/restored automatically")
             else:
                 g_type_cpp = self._c_to_cpp_type(g_type)
                 formatted = self._format_param_type(g_type_cpp, f"saved_{g_name}")
@@ -250,12 +246,11 @@ class GTestBuilder:
         code.append("    // Restore original global variable values")
         for g_name, g_info in global_vars.items():
             g_type = g_info['type']
-            # Check if this is an array type (contains '[')
             is_array = '[' in g_type and ']' in g_type
             if is_array:
-                # Arrays cannot be assigned - skip restoration
-                # (save code would have already skipped it)
-                pass
+                if '(*[' in g_type:
+                    code.append(f"    memcpy({g_name}, saved_{g_name}, sizeof({g_name}));")
+                # else: no save was generated, skip restore
             else:
                 code.append(f"    {g_name} = saved_{g_name};")
         code.append("")
@@ -273,33 +268,42 @@ class GTestBuilder:
         if func.global_vars:
             code.extend(self._build_global_var_save(func.global_vars))
 
-        # Install stubs before any setup
+        # Install non-function-pointer stubs before global variable setup
         if self.stub_framework and self.stub_builder and path.stub_constraints:
+            non_fp_installed = False
             for sc in path.stub_constraints:
-                stub_name = self.stub_builder.stub_func_name(
-                    sc.callee_name, func.name, path_index,
-                    sc.is_function_pointer
-                )
                 if sc.is_function_pointer:
-                    # Function pointer stub - skip local variables as they can't be stubbed from outside
-                    if sc.pointer_source_type == "local":
-                        # Local function pointer variables cannot be stubbed from outside the function
-                        # The stub function for this constraint has not been generated
-                        code.append(f"    // Note: Local function pointer variable '{sc.callee_name}' cannot be stubbed")
-                        continue
-                    var_name = sc.pointer_var_name or sc.callee_name
-                    code.append(self.stub_framework.install_func_ptr_stub(
-                        var_name, stub_name, sc.ret_type
-                    ))
-                else:
-                    # Direct function stub
-                    code.append(self.stub_framework.install_stub(
-                        sc.callee_name, stub_name
-                    ))
-            code.append("")
+                    continue
+                stub_name = self.stub_builder.stub_func_name(sc.callee_name, func.name, path_index, False)
+                code.append(self.stub_framework.install_stub(sc.callee_name, stub_name))
+                non_fp_installed = True
+            if non_fp_installed:
+                code.append("")
 
         if self.construct and func.global_vars:
             code.extend(self._build_global_var_setup(func.global_vars, path.param_values))
+
+        # Install function-pointer stubs AFTER global variable setup so they override
+        # the NULL defaults written by _build_global_var_setup.
+        # Use direct assignment for consistency with global_var_setup style;
+        # global variable restore at the end of the test handles cleanup.
+        if self.stub_framework and self.stub_builder and path.stub_constraints:
+            fp_installed = False
+            for sc in path.stub_constraints:
+                if not sc.is_function_pointer:
+                    continue
+                if sc.pointer_source_type == "local":
+                    code.append(f"    // Note: Local function pointer '{sc.callee_name}' cannot be stubbed from outside")
+                    continue
+                stub_name = self.stub_builder.stub_func_name(sc.callee_name, func.name, path_index, True)
+                var_name = sc.pointer_var_name or sc.callee_name
+                if sc.array_index is not None:
+                    code.append(f"    {var_name}[{sc.array_index}] = {stub_name};")
+                else:
+                    code.append(f"    {var_name} = {stub_name};")
+                fp_installed = True
+            if fp_installed:
+                code.append("")
 
         # Declare scalar/basic params before struct params so array-subscript
         # references (e.g. items[index]) are already in scope when struct fields are set.
@@ -314,19 +318,13 @@ class GTestBuilder:
 
         code.extend(self._build_func_call_and_assert(func, path, path_index))
 
-        # Uninstall stubs after the call
+        # Uninstall non-function-pointer stubs after the call.
+        # Function-pointer stubs are cleaned up implicitly by global variable restore below.
         if self.stub_framework and path.stub_constraints:
-            code.append("")
-            for sc in path.stub_constraints:
-                if sc.is_function_pointer:
-                    # Function pointer stub - skip local variables as they can't be stubbed from outside
-                    if sc.pointer_source_type == "local":
-                        # Local function pointer variables cannot be stubbed from outside the function
-                        continue
-                    var_name = sc.pointer_var_name or sc.callee_name
-                    code.append(self.stub_framework.uninstall_func_ptr_stub(var_name))
-                else:
-                    # Direct function stub
+            non_fp_stubs = [sc for sc in path.stub_constraints if not sc.is_function_pointer]
+            if non_fp_stubs:
+                code.append("")
+                for sc in non_fp_stubs:
                     code.append(self.stub_framework.uninstall_stub(sc.callee_name))
 
         # Restore global variables after test
@@ -378,15 +376,16 @@ class GTestBuilder:
                 # (e.g., leaf field with type information)
                 if len(clean_val_dict) == 1 and 'value' in clean_val_dict and not isinstance(clean_val_dict['value'], dict):
                     # This is a scalar value with metadata (type, pointer flag)
-                    scalar_str = self._clean_scalar_value(clean_val_dict['value'])
-                    if scalar_str == "(void*)1":
+                    raw_val = clean_val_dict['value']
+                    is_non_null = raw_val is NON_NULL
+                    scalar_str = self._clean_scalar_value(raw_val)
+                    if is_non_null:
                         type_str = fval.get('__type__', "")
                         is_fptr = '(*)' in type_str or ')(*' in type_str
                         if is_fptr:
                             scalar_str = self._get_or_create_fp_helper(type_str)
                         else:
-                            # (void*)1 is always a non-NULL placeholder from the extractor;
-                            # construct a backing local variable for the pointed-to type
+                            # NON_NULL sentinel: construct a backing local for the pointed-to type
                             base_type = type_str.replace('*', '').replace('const', '').strip() if type_str else None
                             local = f"{var_name}_{field}_ptr_val"
                             if base_type:
@@ -431,8 +430,8 @@ class GTestBuilder:
                             code.append(f"{space}UnknownType {ptr_var_name} = {{}};")
 
                         # Generate assignments for fields of the pointed-to struct.
-                        # Skip 'value' string entries — they represent the pointer's own
-                        # NULL/(void*)1 sentinel, not a field of the pointed-to struct.
+                        # Skip 'value' entries that are NULL/NON_NULL sentinels for the
+                        # pointer itself, not a field of the pointed-to struct.
                         for subfield, subval in clean_val_dict.items():
                             if subfield == 'value' and not isinstance(subval, dict):
                                 continue  # pointer-value sentinel, not a struct field
@@ -499,36 +498,53 @@ class GTestBuilder:
                     code.extend(field_assignments)
                     code.append(f"    {g_name} = &{local};")
                 elif val is not None:
-                    scalar = self._clean_scalar_value(val)
-                    if scalar == "(void*)1" and "char" in canon_type:
+                    if val is NON_NULL and "char" in canon_type:
                         scalar = '""'
+                    else:
+                        scalar = self._clean_scalar_value(val)
                     code.append(f"    {g_name} = {scalar};")
                 else:
                     # No constraint: allocate a zero-initialized backing local to avoid NULL deref
                     code.append(f"    {backing} {local} = {{}};")
                     code.append(f"    {g_name} = &{local};")
             else:
-                # Handle array types specially - array names cannot be assigned
                 if is_array:
-                    if val is not None:
-                        # Array with a constraint value - this is problematic
-                        code.append(f"    // WARNING: Global array '{g_name}' has constraint '{val}' but array assignment is not supported")
-                        code.append(f"    // TODO: Manually initialize array elements if needed")
+                    if '(*[' in g_type:
+                        # Zero all elements for a clean state, then set constrained elements
+                        code.append(f"    memset({g_name}, 0, sizeof({g_name}));")
+                        if val is not None and isinstance(val, dict):
+                            # Derive element type: "int (*[4])(int, int)" → "int (*)(int, int)"
+                            elem_type = re.sub(r'\(\*\[[^\]]*\]\)', '(*)', g_type)
+                            for key, elem_info in val.items():
+                                if not key.startswith('['):
+                                    continue
+                                inner_val = elem_info.get('value') if isinstance(elem_info, dict) else elem_info
+                                if inner_val is NON_NULL:
+                                    stub_name = self._get_or_create_fp_helper(elem_type)
+                                    code.append(f"    {g_name}{key} = {stub_name};")
+                                elif inner_val is not None and inner_val != "NULL":
+                                    code.append(f"    {g_name}{key} = {self._clean_scalar_value(str(inner_val))};")
                     else:
-                        # No constraint - just add a comment
-                        code.append(f"    // Global array '{g_name}' - initialize elements manually if needed")
+                        if val is not None:
+                            code.append(f"    // WARNING: Global array '{g_name}' has constraint '{val}' but array assignment is not supported")
+                            code.append(f"    // TODO: Manually initialize array elements if needed")
+                        else:
+                            code.append(f"    // Global array '{g_name}' - initialize elements manually if needed")
                 elif val is not None:
                     if isinstance(val, dict):
                         code.append(f"    {g_name} = {{}}; // Reset struct to avoid interference")
                         field_assignments = self._generate_field_assignments(g_name, val)
                         code.extend(field_assignments)
                     else:
-                        scalar = self._clean_scalar_value(val)
-                        if scalar == "(void*)1":
+                        if val is NON_NULL:
                             if is_func_ptr:
                                 scalar = self._get_or_create_fp_helper(g_type)
                             elif "char" in canon_type:
                                 scalar = '""'
+                            else:
+                                scalar = self._clean_scalar_value(val)
+                        else:
+                            scalar = self._clean_scalar_value(val)
                         code.append(f"    {g_name} = {scalar};")
                 else:
                     def_val = self._default_value(canon_type)
@@ -657,7 +673,9 @@ class GTestBuilder:
             code.append(f"    {backing} {local} = {{}};")
             code.append(f"    {ptype} {pname} = &{local};")
         else:
-            scalar = val if (val is not None and not isinstance(val, dict)) else self._default_value(canon_type)
+            # Detect NON_NULL sentinel before converting to string
+            is_non_null = (val is NON_NULL)
+            scalar = val if (val is not None and not isinstance(val, dict) and val is not NON_NULL) else self._default_value(canon_type)
             scalar = self._clean_scalar_value(scalar)
             # If the scalar is a /* TODO: */ placeholder (unresolvable negation) or references
             # a function-internal local variable, fall back to the type default so the code compiles.
@@ -670,12 +688,12 @@ class GTestBuilder:
                     if path_val is not None and not isinstance(path_val, dict):
                         avoid_values.add(str(path_val))
                 scalar = self._get_alternative_value(canon_type, avoid_values)
-            # Treat small positive integers as non-NULL placeholders for pointer types
-            # (the bare boolean check in the extractor returns 1 for != 0 on pointer params)
+            # Small positive integers on pointer params come from bare `!= 0` conditions;
+            # treat them the same as NON_NULL (need a real non-NULL address, not a cast int).
             if is_ptr and not is_func_ptr and re.match(r'^\d+$', scalar) and scalar not in ('0',):
-                scalar = "(void*)1"
-            # (void*)1 is a non-NULL placeholder — construct a real stack variable instead
-            if scalar == "(void*)1":
+                is_non_null = True
+            # NON_NULL: construct a real stack variable instead of an invalid cast
+            if is_non_null:
                 if is_func_ptr:
                     scalar = self._get_or_create_fp_helper(ptype)
                 else:
@@ -921,7 +939,7 @@ class GTestBuilder:
         ret_type, param_types = self._parse_func_ptr_type(func_ptr_type)
         if ret_type is None:
             return "NULL"
-        helper_name = f"_fp_stub_{self._func_ptr_helper_counter}"
+        helper_name = f"stub_fp_noop_{self._func_ptr_helper_counter}"
         self._func_ptr_helper_counter += 1
         self._func_ptr_helpers[func_ptr_type] = (helper_name, ret_type, param_types)
         if self.stub_builder is not None:

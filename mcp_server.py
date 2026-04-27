@@ -127,12 +127,13 @@ def generate_tests(
             stub_builder=stub_bld
         )
 
-        # Write output files
+        # build_cpp() first so _func_ptr_helpers is populated before build_header()
+        # calls stub_builder.build_stub_declarations()
+        cpp_code = builder.build_cpp()
         with open(builder.out_h_path, "w") as f:
             f.write(builder.build_header())
-
         with open(builder.out_cpp_path, "w") as f:
-            f.write(builder.build_cpp())
+            f.write(cpp_code)
 
         stub_files = []
         if stub_bld and stub_bld.has_stubs():

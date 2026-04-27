@@ -100,8 +100,10 @@ class UTGeneratorApp:
             stub_builder=stub_builder,
         )
 
-        h_code = builder.build_header()
+        # build_cpp() first so _func_ptr_helpers is populated before build_header()
+        # calls stub_builder.build_stub_declarations()
         cpp_code = builder.build_cpp()
+        h_code = builder.build_header()
 
         self._write_output(builder.out_h_path, h_code)
         self._write_output(builder.out_cpp_path, cpp_code)
