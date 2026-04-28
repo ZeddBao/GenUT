@@ -268,30 +268,26 @@ class GTestBuilder:
         if func.global_vars:
             code.extend(self._build_global_var_save(func.global_vars))
 
-        # Install non-function-pointer stubs before global variable setup
+        # Partition stubs once so each group can be installed at the right point.
+        # non-FP stubs go before global var setup; FP stubs go after (so they
+        # override the NULL defaults written by _build_global_var_setup).
+        non_fp_stubs: list = []
+        fp_stubs: list = []
         if self.stub_framework and self.stub_builder and path.stub_constraints:
-            non_fp_installed = False
             for sc in path.stub_constraints:
-                if sc.is_function_pointer:
-                    continue
+                (fp_stubs if sc.is_function_pointer else non_fp_stubs).append(sc)
+
+        if non_fp_stubs:
+            for sc in non_fp_stubs:
                 stub_name = self.stub_builder.stub_func_name(sc.callee_name, func.name, path_index, False)
                 code.append(self.stub_framework.install_stub(sc.callee_name, stub_name))
-                non_fp_installed = True
-            if non_fp_installed:
-                code.append("")
+            code.append("")
 
         if self.construct and func.global_vars:
             code.extend(self._build_global_var_setup(func.global_vars, path.param_values))
 
-        # Install function-pointer stubs AFTER global variable setup so they override
-        # the NULL defaults written by _build_global_var_setup.
-        # Use direct assignment for consistency with global_var_setup style;
-        # global variable restore at the end of the test handles cleanup.
-        if self.stub_framework and self.stub_builder and path.stub_constraints:
-            fp_installed = False
-            for sc in path.stub_constraints:
-                if not sc.is_function_pointer:
-                    continue
+        if fp_stubs:
+            for sc in fp_stubs:
                 if sc.pointer_source_type == "local":
                     code.append(f"    // Note: Local function pointer '{sc.callee_name}' cannot be stubbed from outside")
                     continue
@@ -301,9 +297,7 @@ class GTestBuilder:
                     code.append(f"    {var_name}[{sc.array_index}] = {stub_name};")
                 else:
                     code.append(f"    {var_name} = {stub_name};")
-                fp_installed = True
-            if fp_installed:
-                code.append("")
+            code.append("")
 
         # Declare scalar/basic params before struct params so array-subscript
         # references (e.g. items[index]) are already in scope when struct fields are set.
@@ -318,14 +312,11 @@ class GTestBuilder:
 
         code.extend(self._build_func_call_and_assert(func, path, path_index))
 
-        # Uninstall non-function-pointer stubs after the call.
-        # Function-pointer stubs are cleaned up implicitly by global variable restore below.
-        if self.stub_framework and path.stub_constraints:
-            non_fp_stubs = [sc for sc in path.stub_constraints if not sc.is_function_pointer]
-            if non_fp_stubs:
-                code.append("")
-                for sc in non_fp_stubs:
-                    code.append(self.stub_framework.uninstall_stub(sc.callee_name))
+        # FP stubs are cleaned up implicitly by global variable restore below.
+        if self.stub_framework and non_fp_stubs:
+            code.append("")
+            for sc in non_fp_stubs:
+                code.append(self.stub_framework.uninstall_stub(sc.callee_name))
 
         # Restore global variables after test
         if func.global_vars:

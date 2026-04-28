@@ -500,7 +500,7 @@ class ConstraintExtractor:
                 i += 1
             elif k == clang.CursorKind.IF_STMT:
                 neg_ctx, neg_stub = self._handle_if(child, ctx, paths, stub_ctx)
-                has_implicit_else = any(p.description == "else (implicit)" for p in paths)
+                has_implicit_else = bool(paths) and paths[-1].description == "else (implicit)"
                 if has_implicit_else:
                     remaining = children[i+1:]
                     if remaining:
@@ -795,7 +795,6 @@ class ConstraintExtractor:
             else:
                 paths.append(PathConstraint(neg_ctx, "else (implicit)", expected_return=None,
                                              stub_constraints=self._build_stub_constraints(neg_stub)))
-        # 返回否定上下文，用于处理隐式else分支的后续代码
         return neg_ctx, neg_stub
 
     def _build_stub_constraints(self, stub_ctx):
