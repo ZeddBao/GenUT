@@ -223,6 +223,21 @@ class ConstraintExtractor:
                 return element_type.get_pointee()
         return None
 
+    def _extract_pointee_type_info(self, pointee):
+        """Return (ret_type, params) for a function pointer pointee type."""
+        if pointee:
+            ret_type = pointee.get_result().spelling if pointee.get_result() else "void"
+            params = []
+            try:
+                for i, arg_type in enumerate(pointee.argument_types()):
+                    params.append({'name': f"arg{i}", 'type': arg_type.spelling})
+            except Exception:
+                pass
+        else:
+            ret_type = "void"
+            params = []
+        return ret_type, params
+
     def _find_func_ptr_vars(self):
         """Find function pointer variable declarations (global and local)."""
         for node in self.func_node.walk_preorder():
@@ -387,19 +402,8 @@ class ConstraintExtractor:
 
         # Try to extract type info directly from the variable type
         if self._is_function_pointer_type(var_decl.type):
-            pointee = self._get_func_ptr_pointee(var_decl.type)
-            if pointee:
-                ret_type = pointee.get_result().spelling if pointee.get_result() else "void"
-                params = []
-                try:
-                    for i, arg_type in enumerate(pointee.argument_types()):
-                        params.append({'name': f"arg{i}", 'type': arg_type.spelling})
-                except Exception as e:
-                    # Silent error handling
-                    pass
-            else:
-                ret_type = "void"
-                params = []
+            ret_type, params = self._extract_pointee_type_info(
+                self._get_func_ptr_pointee(var_decl.type))
             # Determine source type
             if var_decl.kind == clang.CursorKind.PARM_DECL:
                 source_type = FUNC_PTR_SOURCE_PARAM
@@ -460,18 +464,8 @@ class ConstraintExtractor:
         elif expr.kind == clang.CursorKind.MEMBER_REF_EXPR:
             ref = expr.referenced
             if ref and ref.kind == clang.CursorKind.FIELD_DECL and self._is_function_pointer_type(ref.type):
-                pointee = self._get_func_ptr_pointee(ref.type)
-                if pointee:
-                    ret_type = pointee.get_result().spelling if pointee.get_result() else "void"
-                    params = []
-                    try:
-                        for i, arg_type in enumerate(pointee.argument_types()):
-                            params.append({'name': f"arg{i}", 'type': arg_type.spelling})
-                    except Exception:
-                        pass
-                else:
-                    ret_type = "void"
-                    params = []
+                ret_type, params = self._extract_pointee_type_info(
+                    self._get_func_ptr_pointee(ref.type))
                 for child in expr.get_children():
                     if child.kind == clang.CursorKind.DECL_REF_EXPR and child.referenced:
                         base_ref = child.referenced
@@ -1453,18 +1447,13 @@ class ConstraintExtractor:
             direction = stub_ctx.get(dir_key, 'free')
             forbidden = stub_ctx.get(fbd_key, frozenset())
 
-            if direction == 'down':
-                candidate = n - 1
+            if direction in ('down', 'up'):
+                step = -1 if direction == 'down' else 1
+                candidate = n + step
                 for delta in range(1, 200):
                     if candidate not in forbidden:
                         break
-                    candidate = n - 1 - delta
-            elif direction == 'up':
-                candidate = n + 1
-                for delta in range(1, 200):
-                    if candidate not in forbidden:
-                        break
-                    candidate = n + 1 + delta
+                    candidate = n + step * (1 + delta)
             else:  # 'free'
                 try:
                     h = int(str(hint).replace(' ', ''), 0)

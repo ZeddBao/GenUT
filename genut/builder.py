@@ -283,14 +283,10 @@ class GTestBuilder:
                 code.append(self.stub_framework.install_stub(sc.callee_name, stub_name))
             code.append("")
 
-        # Collect var paths that FP stubs will assign — global var setup must skip those
-        # to avoid emitting a redundant stub_fp_noop assignment that is immediately overwritten.
-        fp_overridden: set = set()
-        for sc in fp_stubs:
-            if sc.pointer_source_type != "local" and sc.pointer_var_name:
-                fp_overridden.add(sc.pointer_var_name)
-
         if self.construct and func.global_vars:
+            # Skip FP vars that the stub assignments below will immediately overwrite.
+            fp_overridden = {sc.pointer_var_name for sc in fp_stubs
+                             if sc.pointer_source_type != "local" and sc.pointer_var_name}
             code.extend(self._build_global_var_setup(func.global_vars, path.param_values,
                                                       skip_fp_vars=fp_overridden))
 
