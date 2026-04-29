@@ -283,8 +283,16 @@ class GTestBuilder:
                 code.append(self.stub_framework.install_stub(sc.callee_name, stub_name))
             code.append("")
 
+        # Collect var paths that FP stubs will assign — global var setup must skip those
+        # to avoid emitting a redundant stub_fp_noop assignment that is immediately overwritten.
+        fp_overridden: set = set()
+        for sc in fp_stubs:
+            if sc.pointer_source_type != "local" and sc.pointer_var_name:
+                fp_overridden.add(sc.pointer_var_name)
+
         if self.construct and func.global_vars:
-            code.extend(self._build_global_var_setup(func.global_vars, path.param_values))
+            code.extend(self._build_global_var_setup(func.global_vars, path.param_values,
+                                                      skip_fp_vars=fp_overridden))
 
         if fp_stubs:
             for sc in fp_stubs:
@@ -464,8 +472,15 @@ class GTestBuilder:
         """Return 'char' in place of 'void' (void locals are illegal in C/C++)."""
         return "char" if base_type == "void" else base_type
 
-    def _build_global_var_setup(self, global_vars, param_values):
-        """Build global variable setup code."""
+    def _build_global_var_setup(self, global_vars, param_values, skip_fp_vars=None):
+        """Build global variable setup code.
+
+        skip_fp_vars: set of fully-qualified var paths (e.g. 'global_math_op' or
+        'global_math_op_struct.operation') whose assignments will be handled by an
+        FP stub immediately after this setup — skip them to avoid a redundant write.
+        """
+        if skip_fp_vars is None:
+            skip_fp_vars = set()
         code = []
         for g_name, g_info in global_vars.items():
             val = param_values.get(g_name)
@@ -477,6 +492,10 @@ class GTestBuilder:
             is_func_ptr = ('(*)' in g_type) or (')(*' in g_type) or ('(*[' in g_type)
             # Check if this is an array type (contains '[')
             is_array = '[' in g_type and ']' in g_type
+
+            # Skip simple global FP vars that will be overridden by an FP stub
+            if is_func_ptr and not is_array and g_name in skip_fp_vars:
+                continue
 
             if is_ptr and not is_func_ptr:
                 base_type = g_type.replace('*', '').replace('const', '').strip()
@@ -523,9 +542,13 @@ class GTestBuilder:
                             code.append(f"    // Global array '{g_name}' - initialize elements manually if needed")
                 elif val is not None:
                     if isinstance(val, dict):
+                        # Filter out struct fields that will be overridden by FP stubs
+                        filtered_val = {k: v for k, v in val.items()
+                                        if f'{g_name}.{k}' not in skip_fp_vars}
                         code.append(f"    {g_name} = {{}}; // Reset struct to avoid interference")
-                        field_assignments = self._generate_field_assignments(g_name, val)
-                        code.extend(field_assignments)
+                        if filtered_val:
+                            field_assignments = self._generate_field_assignments(g_name, filtered_val)
+                            code.extend(field_assignments)
                     else:
                         if val is NON_NULL:
                             if is_func_ptr:

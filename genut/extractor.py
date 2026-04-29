@@ -456,6 +456,41 @@ class ConstraintExtractor:
                 if result:
                     return result
 
+        # MEMBER_REF_EXPR - struct/union field that is a function pointer (e.g. s.op(...))
+        elif expr.kind == clang.CursorKind.MEMBER_REF_EXPR:
+            ref = expr.referenced
+            if ref and ref.kind == clang.CursorKind.FIELD_DECL and self._is_function_pointer_type(ref.type):
+                pointee = self._get_func_ptr_pointee(ref.type)
+                if pointee:
+                    ret_type = pointee.get_result().spelling if pointee.get_result() else "void"
+                    params = []
+                    try:
+                        for i, arg_type in enumerate(pointee.argument_types()):
+                            params.append({'name': f"arg{i}", 'type': arg_type.spelling})
+                    except Exception:
+                        pass
+                else:
+                    ret_type = "void"
+                    params = []
+                for child in expr.get_children():
+                    if child.kind == clang.CursorKind.DECL_REF_EXPR and child.referenced:
+                        base_ref = child.referenced
+                        base_var = base_ref.spelling
+                        field_name = ref.spelling
+                        if (base_ref.semantic_parent and base_ref.semantic_parent.kind in
+                                (clang.CursorKind.TRANSLATION_UNIT, clang.CursorKind.NAMESPACE)):
+                            source_type = FUNC_PTR_SOURCE_GLOBAL
+                        else:
+                            source_type = FUNC_PTR_SOURCE_LOCAL
+                        return {
+                            'callee_name': field_name,
+                            'ret_type': ret_type,
+                            'params': params,
+                            'is_function_pointer': True,
+                            'pointer_var_name': f'{base_var}.{field_name}',
+                            'pointer_source_type': source_type,
+                        }
+
         # Check children recursively
         for child in expr.get_children():
             result = self._extract_callee_info_from_expr(child, call_expr)
@@ -1354,25 +1389,20 @@ class ConstraintExtractor:
             hint = existing if not isinstance(existing, dict) else None
             m = re.search(rf'\b{re.escape(var_name)}\s*(>|>=|<|<=|==|!=)\s*{_LIT}', token_str)
             if m:
-                if m.group(2) not in local_results:
-                    new_stub[var_name] = self._solve(m.group(1), m.group(2), negate, hint)
-                    # If RHS is a function parameter, pin it to 0 (the value assumed by _solve)
-                    # so the generated test uses a consistent value instead of an arbitrary fallback.
-                    if m.group(2) in param_vars and m.group(2) not in new_ctx:
-                        new_ctx[m.group(2)] = '0'
+                op_str, lit_str = m.group(1), m.group(2)
+                if lit_str not in local_results:
+                    new_stub[var_name] = self._solve_stub_val(op_str, lit_str, negate, hint, new_stub, var_name)
+                    if lit_str in param_vars and lit_str not in new_ctx:
+                        new_ctx[lit_str] = '0'
                 else:
-                    # Both operands are call-result locals (e.g., result1 > result2).
-                    # Treat the right operand as 0 (its default when the FP is NULL),
-                    # so the left operand gets a concrete satisfying value.
-                    new_stub[var_name] = self._solve(m.group(1), '0', negate, hint)
+                    new_stub[var_name] = self._solve(op_str, '0', negate, hint)
                 continue
             m = re.search(rf'{_LIT}\s*(>|>=|<|<=|==|!=)\s*\b{re.escape(var_name)}\b', token_str)
             if m and m.group(1) not in local_results:
                 prefix = token_str[:m.start(1)].rstrip()
                 if not (prefix.endswith('.') or prefix.endswith('->')):
                     rev = self._OP_REVERSE.get(m.group(2), m.group(2))
-                    new_stub[var_name] = self._solve(rev, m.group(1), negate, hint)
-                    # If LHS is a function parameter, pin it to 0 (the value assumed by _solve)
+                    new_stub[var_name] = self._solve_stub_val(rev, m.group(1), negate, hint, new_stub, var_name)
                     if m.group(1) in param_vars and m.group(1) not in new_ctx:
                         new_ctx[m.group(1)] = '0'
             # If m.group(1) is in local_results (other operand is also a call-result local):
@@ -1395,6 +1425,68 @@ class ConstraintExtractor:
                     new_stub[f"__outparam__{var_name}"] = self._solve(rev, m.group(1), negate, hint)
 
         return new_ctx, new_stub
+
+    def _solve_stub_val(self, op, lit_str, negate, hint, stub_ctx, var_name):
+        """Compute stub return value with direction+forbidden tracking for equality negations.
+
+        When an if-else-if chain accumulates multiple negated conditions (e.g. v > 0,
+        v == 0, v == -1), simple hint-based logic can pick a value that violates a
+        previously accumulated inequality constraint.  This method tracks:
+          - __nstub_dir__<var>: 'down' (accumulated upper-bound), 'up' (lower-bound), 'free'
+          - __nstub_fbd__<var>: frozenset of integer literals that must be avoided
+
+        For direction='down', each equality negation picks n-1 (and decrements further if
+        that value is already forbidden), staying on the correct side of the bound.
+        """
+        dir_key = f'__nstub_dir__{var_name}'
+        fbd_key = f'__nstub_fbd__{var_name}'
+
+        if negate and op == '==':
+            try:
+                n = int(lit_str.replace(' ', ''), 0)
+            except (ValueError, TypeError):
+                return self._solve(op, lit_str, negate, hint)
+
+            direction = stub_ctx.get(dir_key, 'free')
+            forbidden = stub_ctx.get(fbd_key, frozenset())
+
+            if direction == 'down':
+                candidate = n - 1
+                for delta in range(1, 200):
+                    if candidate not in forbidden:
+                        break
+                    candidate = n - 1 - delta
+            elif direction == 'up':
+                candidate = n + 1
+                for delta in range(1, 200):
+                    if candidate not in forbidden:
+                        break
+                    candidate = n + 1 + delta
+            else:  # 'free'
+                try:
+                    h = int(str(hint).replace(' ', ''), 0)
+                    candidate = n + 1
+                    if candidate == h:
+                        candidate = n - 1
+                    for delta in range(1, 200):
+                        if candidate not in forbidden:
+                            break
+                        candidate = n + delta if (n + delta) != h else n - delta
+                except (ValueError, TypeError):
+                    candidate = n + 1
+
+            stub_ctx[fbd_key] = frozenset(forbidden | {n})
+            return str(candidate)
+
+        # Non-equality or non-negation: use standard _solve and record direction
+        result = self._solve(op, lit_str, negate, hint)
+        if negate and op in ('>', '>=') and dir_key not in stub_ctx:
+            stub_ctx[dir_key] = 'down'
+            stub_ctx[fbd_key] = frozenset()
+        elif negate and op in ('<', '<=') and dir_key not in stub_ctx:
+            stub_ctx[dir_key] = 'up'
+            stub_ctx[fbd_key] = frozenset()
+        return result
 
     def _solve(self, op, literal, negate, hint=None):
         literal_stripped = literal.replace(' ', '')

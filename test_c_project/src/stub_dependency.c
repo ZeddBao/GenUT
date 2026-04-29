@@ -39,24 +39,38 @@ MathOperation global_math_op_struct = {
  * 场景3：普通函数打桩 — 测试中使用 INSTALL_STUB(dep_query_int, stub_fn)
  *===========================================================================*/
 
-/** 场景1：分支由全局函数指针 global_math_op 是否为 NULL 决定。
- *  非NULL路径需将 global_math_op 赋值为桩函数。 */
+/** 场景1：分支由全局函数指针 global_math_op 是否为 NULL 及其返回值决定。
+ *  非NULL路径需将 global_math_op 赋值为返回特定值的桩函数。 */
 int basic_global_fp_branch(int a, int b)
 {
     if (global_math_op == NULL) {
         return -1;
     }
-    return global_math_op(a, b);
+    int result = global_math_op(a, b);
+    if (result > 0) {
+        return 1;
+    } else if (result == 0) {
+        return 0;
+    } else {
+        return -2;
+    }
 }
 
-/** 场景2：分支由全局结构体 global_math_op_struct 中的函数指针字段决定。
- *  非NULL路径需将 global_math_op_struct.operation 赋值为桩函数。 */
+/** 场景2：分支由全局结构体函数指针字段是否为 NULL 及其返回值决定。
+ *  非NULL路径需将 global_math_op_struct.operation 赋值为返回特定值的桩函数。 */
 int basic_global_struct_fp_branch(int a, int b)
 {
     if (global_math_op_struct.operation == NULL) {
         return -1;
     }
-    return global_math_op_struct.operation(a, b);
+    int result = global_math_op_struct.operation(a, b);
+    if (result > 0) {
+        return 1;
+    } else if (result == 0) {
+        return 0;
+    } else {
+        return -2;
+    }
 }
 
 /** 场景3：分支由直接调用 dep_query_int() 的返回值决定。
@@ -66,8 +80,13 @@ int basic_install_stub_branch(void)
     int v = dep_query_int();
     if (v > 0) {
         return 1;
+    } else if (v == 0) {
+        return 0;
+    } else if (v == -1) {
+        return -1;
+    } else {
+        return -2;
     }
-    return 0;
 }
 
 /*============================================================================
