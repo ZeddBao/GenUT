@@ -1396,6 +1396,9 @@ class ConstraintExtractor:
                         new_ctx[lit_str] = '0'
                 else:
                     new_stub[var_name] = self._solve_stub_val(op_str, '0', negate, hint, new_stub, var_name)
+                    # Anchor the right-side call-result local to 0 so it is also stubbed
+                    if lit_str in self.call_var_map and lit_str not in new_stub:
+                        new_stub[lit_str] = '0'
                 continue
             m = re.search(rf'{_LIT}\s*(>|>=|<|<=|==|!=)\s*\b{re.escape(var_name)}\b', token_str)
             if m and m.group(1) not in local_results:
