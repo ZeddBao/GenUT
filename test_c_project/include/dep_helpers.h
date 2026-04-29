@@ -70,6 +70,12 @@ int dep_acquire(const char* name);
 /** 释放资源锁，无返回值。配合 dep_acquire 使用。 */
 void dep_release(const char* name);
 
+/**
+ * 读取整数值并写入 *out_val，返回状态码，默认成功(0)并写入 0。
+ * 用于测试：出参整数值驱动分支。
+ */
+int dep_load_value(const char* key, int* out_val);
+
 #ifdef __cplusplus
 }
 #endif

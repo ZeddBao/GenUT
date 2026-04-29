@@ -119,3 +119,14 @@ void dep_release(const char* name)
 {
     (void)name;
 }
+
+/** 读取整数值并写入 *out_val，默认成功(0)并写入 0。 */
+int dep_load_value(const char* key, int* out_val)
+{
+    (void)key;
+    if (out_val == NULL) {
+        return -1;
+    }
+    *out_val = 0;
+    return 0;
+}

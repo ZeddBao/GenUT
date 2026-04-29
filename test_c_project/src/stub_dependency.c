@@ -89,6 +89,40 @@ int basic_install_stub_branch(void)
     }
 }
 
+/** 场景4：分支由两个 dep_* 返回值的关系决定。
+ *  a 和 b 均为 call-result 局部变量，生成器将 b 视为 0，仅对 a 生成桩约束。 */
+int basic_dual_return_compare(void)
+{
+    int a = dep_read_sensor_a();
+    int b = dep_read_sensor_b();
+    if (a > b) {
+        return 1;
+    } else if (a == b) {
+        return 0;
+    } else {
+        return -1;
+    }
+}
+
+/** 场景5：出参整数值驱动分支。
+ *  dep_load_value 通过 *out_val 写入整数，桩需同时控制返回值（决定错误路径）
+ *  和 *out_val（决定正常路径内的具体分支）。 */
+int basic_outparam_branch(const char* key)
+{
+    int val = 0;
+    int ret = dep_load_value(key, &val);
+    if (ret != 0) {
+        return -1;
+    }
+    if (val > 100) {
+        return 2;
+    } else if (val > 0) {
+        return 1;
+    } else {
+        return 0;
+    }
+}
+
 /*============================================================================
  * Functions taking function pointers as parameters
  *===========================================================================*/

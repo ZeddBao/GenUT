@@ -48,6 +48,10 @@ int basic_global_fp_branch(int a, int b);
 int basic_global_struct_fp_branch(int a, int b);
 /** 场景3：直接调用分支（INSTALL_STUB 打桩）。 */
 int basic_install_stub_branch(void);
+/** 场景4：两个桩函数返回值互相比较，生成器将 b 视为 0 求解 a 的约束。 */
+int basic_dual_return_compare(void);
+/** 场景5：出参整数值驱动分支，桩函数需同时控制返回值和 *out_val 写入。 */
+int basic_outparam_branch(const char* key);
 
 /*============================================================================
  * Functions taking function pointers as parameters
