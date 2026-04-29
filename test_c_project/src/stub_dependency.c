@@ -32,6 +32,45 @@ MathOperation global_math_op_struct = {
 };
 
 /*============================================================================
+ * Basic scenario examples (placed first for clarity)
+ *
+ * 场景1：全局函数指针 — 测试中直接赋值 global_math_op = stub_fn
+ * 场景2：全局结构体含FP字段 — 测试中赋值 global_math_op_struct.operation = stub_fn
+ * 场景3：普通函数打桩 — 测试中使用 INSTALL_STUB(dep_query_int, stub_fn)
+ *===========================================================================*/
+
+/** 场景1：分支由全局函数指针 global_math_op 是否为 NULL 决定。
+ *  非NULL路径需将 global_math_op 赋值为桩函数。 */
+int basic_global_fp_branch(int a, int b)
+{
+    if (global_math_op == NULL) {
+        return -1;
+    }
+    return global_math_op(a, b);
+}
+
+/** 场景2：分支由全局结构体 global_math_op_struct 中的函数指针字段决定。
+ *  非NULL路径需将 global_math_op_struct.operation 赋值为桩函数。 */
+int basic_global_struct_fp_branch(int a, int b)
+{
+    if (global_math_op_struct.operation == NULL) {
+        return -1;
+    }
+    return global_math_op_struct.operation(a, b);
+}
+
+/** 场景3：分支由直接调用 dep_query_int() 的返回值决定。
+ *  必须通过 INSTALL_STUB(dep_query_int, stub_fn) 才能覆盖全部路径。 */
+int basic_install_stub_branch(void)
+{
+    int v = dep_query_int();
+    if (v > 0) {
+        return 1;
+    }
+    return 0;
+}
+
+/*============================================================================
  * Functions taking function pointers as parameters
  *===========================================================================*/
 

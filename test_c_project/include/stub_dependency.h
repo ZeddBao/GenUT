@@ -39,6 +39,17 @@ typedef struct {
 extern MathOperation global_math_op_struct;
 
 /*============================================================================
+ * Basic scenario examples
+ *===========================================================================*/
+
+/** 场景1：全局函数指针分支（赋值桩函数）。 */
+int basic_global_fp_branch(int a, int b);
+/** 场景2：全局结构体函数指针字段分支（赋值桩函数）。 */
+int basic_global_struct_fp_branch(int a, int b);
+/** 场景3：直接调用分支（INSTALL_STUB 打桩）。 */
+int basic_install_stub_branch(void);
+
+/*============================================================================
  * Functions taking function pointers as parameters
  *===========================================================================*/
 
